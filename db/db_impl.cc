@@ -57,6 +57,9 @@ struct DBImpl::CompactionState {
     uint64_t number;
     uint64_t file_size;
     InternalKey smallest, largest;
+#ifdef MZP
+    size_t sst_count;
+#endif
   };
 
   Output* current_output() { return &outputs[outputs.size() - 1]; }
@@ -77,6 +80,10 @@ struct DBImpl::CompactionState {
   SequenceNumber smallest_snapshot;
 
   std::vector<Output> outputs;
+#ifdef MZP
+  std::vector<FileMetaData*> alters;
+  FileMetaData* current_alter;
+#endif
 
   // State kept for output being generated
   WritableFile* outfile;
@@ -233,7 +240,14 @@ void DBImpl::RemoveObsoleteFiles() {
 
   // Make a set of all of the live files
   std::set<uint64_t> live = pending_outputs_;
+#ifdef MZP
+  // 这里也要把pending_alter中的文件都放进live
+  for (auto &f : pending_alters_) {
+    live.insert(f->number);
+  }
+#endif
   versions_->AddLiveFiles(&live);
+
 
   std::vector<std::string> filenames;
   env_->GetChildren(dbname_, &filenames);  // Ignoring errors on purpose
@@ -535,8 +549,13 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
     if (base != nullptr) {
       level = base->PickLevelForMemTableOutput(min_user_key, max_user_key);
     }
+#ifdef MZP
+    edit->AddFile(level, meta.number, meta.file_size, meta.sst_count,
+                  meta.smallest, meta.largest);
+#else
     edit->AddFile(level, meta.number, meta.file_size, meta.smallest,
                   meta.largest);
+#endif
   }
 
   CompactionStats stats;
@@ -699,6 +718,60 @@ void DBImpl::BackgroundCall() {
   background_work_finished_signal_.SignalAll();
 }
 
+#ifdef MZP
+void DBImpl::BackgroundCompaction() {
+  mutex_.AssertHeld();
+
+  if (imm_ != nullptr) {
+    CompactMemTable();
+    return;
+  }
+
+   // 不考虑manual!!!
+  Compaction* c = versions_->PickCompaction();
+
+  Status status;
+  if (c == nullptr) {
+    // Nothing to do
+  } else if (c->IsTrivialMove()) {
+    // 直接把文件移到下层，这里上层可能有多个文件
+    int file_num = c->num_input_files(0), level = c->level();
+    for (int i = 0; i < file_num; ++i) {
+      FileMetaData* f = c->input(0, i);
+      c->edit()->RemoveFile(level, f->number);
+      // 这里AddFlie后，然后edit和current合并成new ver的时候，会对文件排序的
+      c->edit()->AddFile(level + 1, f->number, f->file_size, f->sst_count,
+                        f->smallest, f->largest);
+    }
+    
+    status = versions_->LogAndApply(c->edit(), &mutex_);
+    if (!status.ok()) {
+      RecordBackgroundError(status);
+    }
+    VersionSet::LevelSummaryStorage tmp;
+    Log(options_.info_log, "Moved #%d file to level-%d %s: %s\n",
+        file_num, level + 1, status.ToString().c_str(), versions_->LevelSummary(&tmp));
+  } else {
+    CompactionState* compact = new CompactionState(c);
+    status = DoCompactionWork(compact);
+    if (!status.ok()) {
+      RecordBackgroundError(status);
+    }
+    CleanupCompaction(compact);
+    c->ReleaseInputs();
+    RemoveObsoleteFiles();
+  }
+  delete c;
+
+  if (status.ok()) {
+    // Done
+  } else if (shutting_down_.load(std::memory_order_acquire)) {
+    // Ignore compaction errors found during shutting down
+  } else {
+    Log(options_.info_log, "Compaction error: %s", status.ToString().c_str());
+  }
+}
+#else
 void DBImpl::BackgroundCompaction() {
   mutex_.AssertHeld();
 
@@ -779,7 +852,29 @@ void DBImpl::BackgroundCompaction() {
     manual_compaction_ = nullptr;
   }
 }
+#endif
 
+#ifdef MZP
+void DBImpl::CleanupCompaction(CompactionState* compact) {
+  mutex_.AssertHeld();
+  if (compact->builder != nullptr) {
+    // May happen if we get a shutdown call in the middle of compaction
+    compact->builder->Abandon();
+    delete compact->builder;
+  } else {
+    assert(compact->outfile == nullptr);
+    assert(compact->current_alter == nullptr);
+  }
+  delete compact->outfile;
+  for (auto &out : compact->outputs) {
+    pending_outputs_.erase(out.number);
+  }
+  for (auto &f : compact->alters) {
+    pending_alters_.erase(f);
+  }
+  delete compact;
+}
+#else
 void DBImpl::CleanupCompaction(CompactionState* compact) {
   mutex_.AssertHeld();
   if (compact->builder != nullptr) {
@@ -796,6 +891,103 @@ void DBImpl::CleanupCompaction(CompactionState* compact) {
   }
   delete compact;
 }
+#endif
+
+#ifdef MZP
+Status DBImpl::OpenAppendOutputFile(CompactionState* compact, FileMetaData* f) {
+  assert(compact != nullptr);
+  assert(compact->builder == nullptr);
+  {
+    mutex_.Lock();
+    pending_alters_.insert(f);
+    compact->alters.push_back(f);
+    mutex_.Unlock();
+  }
+
+  // Make the output file
+  std::string fname = TableFileName(dbname_, f->file_number);
+  Status s = env_->NewRandomWritableFile(fname, &compact->outfile);
+  if (s.ok()) {
+    compact->builder = new TableBuilder(options_, compact->outfile);
+    compact->builder->MoveToEnd();
+    compact->current_alter = f;
+  }
+  return s;
+}
+
+Status DBImpl::FinishAppendOutputFile(CompactionState* compact,
+                                          Iterator* input) {
+  assert(compact != nullptr);
+  assert(compact->current_alter != nullptr);
+  assert(compact->builder != nullptr);
+
+  FileMetaData* f = compact->current_alter;
+  assert(f->number != 0);
+
+  // Check for iterator errors
+  Status s = input->status();
+  const uint64_t current_entries = compact->builder->NumEntries();
+  if (s.ok()) {
+    s = compact->builder->AppendFinish(f->sst_count);
+  } else {
+    compact->builder->Abandon();
+  }
+  const uint64_t current_bytes = compact->builder->FileSize();  // 这个没问题
+  f->file_size = current_bytes;
+  ++f->sst_count;
+  compact->total_bytes += current_bytes;
+  delete compact->builder;
+  compact->builder = nullptr;
+
+  // Finish and check for file errors
+  if (s.ok()) {
+    s = compact->outfile->Sync();
+  }
+  if (s.ok()) {
+    s = compact->outfile->Close();
+  }
+  delete compact->outfile;
+  compact->outfile = nullptr;
+  compact->current_alter = nullptr;
+
+  if (s.ok() && current_entries > 0) {
+    // Verify that the table is usable
+    Cache::Handle* handle = nullptr;
+    s = table_cache->FindTable(f->number, current_bytes, &handle);
+    table_cache->ReleaseHandle(handle);  // just verify
+
+    if (s.ok()) {
+      Log(options_.info_log, "Generated table #%llu@%d: %lld keys, %lld bytes",
+          (unsigned long long)f->number, compact->compaction->level(),
+          (unsigned long long)current_entries,
+          (unsigned long long)current_bytes);
+    }
+  }
+  return s;
+}
+
+Status InstallCompactionResults(CompactionState* compact,
+    std::vector<FileMetaData*> inputs1_clean_files) {
+  mutex_.AssertHeld();
+  const int level = compact->compaction->level();
+  Log(options_.info_log, "Compacted %d@%d + %d@%d files => %lld bytes",
+      compact->compaction->num_input_files(0), level,
+      compact->compaction->num_input_files(1), level + 1,
+      static_cast<long long>(compact->total_bytes));
+
+  // 文件变更应用到版本edit，包括删除的，新增的，更改的
+  compact->compaction->AddInputDeletions(compact->compaction->edit(), inputs1_clean_files);
+  for (auto &out : compact->outputs) {
+    compact->compaction->edit()->AddFile(level + 1, out.number, out.file_size,
+                                         out.smallest, out.largest);
+  }
+  for (auto &f : compact->alters) {
+    compact->compaction->edit()->AlterFile(level + 1, f);
+  }
+
+  return versions_->LogAndApply(compact->compaction->edit(), &mutex_);    
+}
+#endif
 
 Status DBImpl::OpenCompactionOutputFile(CompactionState* compact) {
   assert(compact != nullptr);
@@ -809,6 +1001,9 @@ Status DBImpl::OpenCompactionOutputFile(CompactionState* compact) {
     out.number = file_number;
     out.smallest.Clear();
     out.largest.Clear();
+#ifdef MZP
+    out.sst_count = 0;
+#endif
     compact->outputs.push_back(out);
     mutex_.Unlock();
   }
@@ -857,10 +1052,16 @@ Status DBImpl::FinishCompactionOutputFile(CompactionState* compact,
 
   if (s.ok() && current_entries > 0) {
     // Verify that the table is usable
+#ifdef MZP
+    Cache::Handle* handle = nullptr;
+    s = table_cache->FindTable(output_number, current_bytes, &handle);
+    table_cache->ReleaseHandle(handle);  // just verify
+#else
     Iterator* iter =
         table_cache_->NewIterator(ReadOptions(), output_number, current_bytes);
     s = iter->status();
     delete iter;
+#endif
     if (s.ok()) {
       Log(options_.info_log, "Generated table #%llu@%d: %lld keys, %lld bytes",
           (unsigned long long)output_number, compact->compaction->level(),
@@ -889,6 +1090,227 @@ Status DBImpl::InstallCompactionResults(CompactionState* compact) {
   return versions_->LogAndApply(compact->compaction->edit(), &mutex_);
 }
 
+#ifdef MZP
+// 原来就是直接一个迭代器，一个大循环，输出到新文件就行了
+// 现在要复杂的多，慢慢来。
+// 首先还是先类似迭代器排序（我还是对迭代器不感冒啊）,然后依次往下层文件塞，
+// 这里需要先对下层文件排个序？塞采用左超右不超的原则（最后一个右超的new）。
+// 如果塞时发现文件大小超过阈值或sst_count达到阈值，那就new。
+Status DBImpl::(CompactionState* compact) {
+  const uint64_t start_micros = env_->NowMicros();
+  int64_t imm_micros = 0;  // Micros spent doing imm_ compactions
+
+  Log(options_.info_log, "Compacting %d@%d + %d@%d files",
+      compact->compaction->num_input_files(0), compact->compaction->level(),
+      compact->compaction->num_input_files(1),
+      compact->compaction->level() + 1);
+
+  assert(versions_->NumLevelFiles(compact->compaction->level()) > 0);
+  assert(compact->builder == nullptr);
+  assert(compact->outfile == nullptr);
+  if (snapshots_.empty()) {
+    compact->smallest_snapshot = versions_->LastSequence();
+  } else {
+    compact->smallest_snapshot = snapshots_.oldest()->sequence_number();
+  }
+
+  // 这里涉及上层所有文件+下层达到最大sst_cout或者文件大小阈值的文件
+  std::set<FileMetaData* > inputs1_clean_files;
+  Iterator* input = versions_->MakeInputIterator(compact->compaction, inputs1_clean_files);
+
+  // 存疑，构建迭代器的时候需要加锁吗？因为版本问题？
+  mutex_.Unlock();
+
+  input->SeekToFirst();
+  Status status;
+  ParsedInternalKey ikey;
+  std::string current_user_key;
+  bool has_current_user_key = false;
+  SequenceNumber last_sequence_for_key = kMaxSequenceNumber;
+  int current_input1_index = 0;
+  int input1_file_num = compact->compaction->num_input_files(1);
+  while (input->Valid() && !shutting_down_.load(std::memory_order_acquire)) {
+    // 如果有内存刷盘，先执行内存刷盘
+    if (has_imm_.load(std::memory_order_relaxed)) {
+      const uint64_t imm_start = env_->NowMicros();
+      mutex_.Lock();
+      if (imm_ != nullptr) {
+        CompactMemTable();
+        // Wake up MakeRoomForWrite() if necessary.
+        background_work_finished_signal_.SignalAll();
+      }
+      mutex_.Unlock();
+      imm_micros += (env_->NowMicros() - imm_start);
+    }
+
+    // 不考虑跟grandparent的重合过多而提前停止compact
+
+    // 处理kv,主要是判断一下是否该被清理，总的来说：
+    // 1) 首先解析key，获得user_key、type(删除新增)、序列号, 解析失败当鸵鸟
+    // 2) 对于删除的key，需要保证更高层没有相同user_key, 且小于最老快照号，才能清理
+    // 3) 对于新增的key，需要保证自己是第二个以上的小于等于最老快照号的相同user_key,才能清理
+    bool drop = false;
+    if (!ParseInternalKey(key, &ikey)) {  // 1)
+      current_user_key.clear();
+      has_current_user_key = false;
+      last_sequence_for_key = kMaxSequenceNumber;
+    } else {
+      // user_key第一次出现
+      if (!has_current_user_key ||
+          user_comparator()->Compare(ikey.user_key, Slice(current_user_key)) != 0) {
+        current_user_key.assign(ikey.user_key.data(), ikey.user_key.size());
+        has_current_user_key = true;
+        last_sequence_for_key = kMaxSequenceNumber;
+
+        if (ikey.type == kTypeDeletion && ikey.sequence <= compact->smallest_snapshot
+            && compact->compaction->IsBaseLevelForKey(ikey.user_key)) {  // 2)
+          drop = true;
+        }
+      } else if (last_sequence_for_key <= compact->smallest_snapshot) {  // 3)
+        drop = true;
+      }
+      // 标记成当前key的序列号
+      last_sequence_for_key = ikey.sequence;  
+    }
+#if 0
+    Log(options_.info_log,
+        "  Compact: %s, seq %d, type: %d %d, drop: %d, is_base: %d, "
+        "%d smallest_snapshot: %d",
+        ikey.user_key.ToString().c_str(),
+        (int)ikey.sequence, ikey.type, kTypeValue, drop,
+        compact->compaction->IsBaseLevelForKey(ikey.user_key),
+        (int)last_sequence_for_key, (int)compact->smallest_snapshot);
+#endif
+
+    // 如果该key不会被清理，那么就意味着要写文件了，这里分两种情况
+    // 1) 下层有对应key范围的文件且没达到sst_count(这个属于输入部分了)，那么直接追加。
+    // 2) 否则写新文件(或者之前建立的新文件)
+    if (!drop) {
+      Loop1:
+      if (input1_file_num != 0 && current_input1_index < input1_file_num) {
+        FileMetaData* f = compact->compaction->input(1, current_input1_index);
+        if (internal_comparator_.Compare(key, f->largest.Encode()) < 0) {
+          if (inputs1_clean_files.count(f) == 0) {
+            // 到这里是追加文件，如果之前有正在新建add的文件，先结束掉
+            if (compact->outfile != nullptr) {
+              status = FinishCompactionOutputFile(compact, input);
+              if (!status.ok()) {
+                break;
+              }
+            }
+            // 下层有对应key范围的文件，且不属于输入部分(没达到sst_count)
+            if (compact->current_alter == nullptr) {
+              // 对应下层文件第一个追加的key，要初始化打开
+              status = OpenAppendOutputFile(compact, f);
+              if (!status.ok()) {
+                break;
+              }
+            } else if (compact->current_alter != f) {
+              // 上一个追加的下层文件已经结束了，先收尾再打开新的
+              status = FinishAppendOutputFile(compact, input);
+              if (!status.ok()) {
+                break;
+              }
+              status = OpenAppendOutputFile(compact, f);
+              if (!status.ok()) {
+                break;
+              }
+            }
+            // 到这里待追加的下层文件确定了，追加即可，同时可能更新追加文件的最小key
+            if (internal_comparator_.Compare(key, f->smallest.Encode()) < 0) {
+              compact->current_alter->smallest.DecodeFrom(key);
+            }
+            compact->builder->Add(key, input->value());
+          }
+          // else 下层有对应key范围的文件，但属于输入部分，则new
+        } else {
+          // 下层当前文件不对应key范围(key超过了下层文件的最大值)
+          ++current_input1_index;
+          goto Loop1;
+        }
+      }
+      // 到这里就是写新文件了
+      // 如果之前有正在追加alter的文件，先结束掉
+      if (compact->current_alter != nullptr) {
+        status = FinishAppendOutputFile(compact, input);
+        if (!status.ok()) {
+          break;
+        }
+      }
+      // 如果之前没有new 文件，新建一个
+      if (compact->builder == nullptr) {
+        status = OpenCompactionOutputFile(compact);
+        if (!status.ok()) {
+          break;
+        }
+        // 新建之后的第一个key肯定是最小的
+        compact->current_output()->smallest.DecodeFrom(key);
+      }
+      // 到这里待写入的新下层文件确定了，add即可，同时更新新文件的最大key
+      compact->current_output()->largest.DecodeFrom(key);
+      compact->builder->Add(key, input->value());
+
+      // 写新文件的时候可以控制下大小
+      if (compact->builder->FileSize() >=
+          compact->compaction->MaxOutputFileSize()) {
+        status = FinishCompactionOutputFile(compact, input);
+        if (!status.ok()) {
+          break;
+        }
+      }
+    }
+
+    // 到这里当前key写入完成，继续next
+    input->Next();
+  }
+
+  if (status.ok() && shutting_down_.load(std::memory_order_acquire)) {
+    status = Status::IOError("Deleting DB during compaction");
+  }
+  if (status.ok() && compact->current_alter != nullptr) {
+    status = FinishAppendOutputFile(compact, input);
+  }
+  if (status.ok() && compact->builder != nullptr) {
+    status = FinishCompactionOutputFile(compact, input);
+  }
+  if (status.ok()) {
+    status = input->status();
+  }
+  delete input;
+  input = nullptr;
+
+
+  // 合并的文件写完了，现在来搞版本
+  CompactionStats stats;
+  stats.micros = env_->NowMicros() - start_micros - imm_micros;
+  // 这是统计compaction期间的IO量
+  for (int i = 0; i < compact->compaction->num_input_files(0); ++i) {
+    stats.bytes_read += compact->compaction->input(0, i)->file_size;
+  }
+  for (auto &f : inputs1_clean_files) {
+    stats.bytes_read += f->file_size;
+  }
+  for (auto &f : compact->outputs) {
+    stats.bytes_written += f.file_size;
+  }
+  for (auto &f : compact->alters) {
+    stats.bytes_written += f->file_size;
+  }
+
+  mutex_.Lock();
+  stats_[compact->compaction->level() + 1].Add(stats);
+
+  if (status.ok()) {
+    status = InstallCompactionResults(compact);
+  }
+  if (!status.ok()) {
+    RecordBackgroundError(status);
+  }
+  VersionSet::LevelSummaryStorage tmp;
+  Log(options_.info_log, "compacted to: %s", versions_->LevelSummary(&tmp));
+  return status;
+}
+#else
 Status DBImpl::DoCompactionWork(CompactionState* compact) {
   const uint64_t start_micros = env_->NowMicros();
   int64_t imm_micros = 0;  // Micros spent doing imm_ compactions
@@ -1049,6 +1471,7 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
   Log(options_.info_log, "compacted to: %s", versions_->LevelSummary(&tmp));
   return status;
 }
+#endif
 
 namespace {
 

@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <iostream>
 
 #include "leveldb/export.h"
 #include "leveldb/status.h"
@@ -94,7 +95,10 @@ class LEVELDB_EXPORT Env {
   // The returned file will only be accessed by one thread at a time.
   virtual Status NewWritableFile(const std::string& fname,
                                  WritableFile** result) = 0;
-
+#ifdef MZP
+  virtual Status NewRandomWritableFile(const std::string& fname,
+                                       WritableFile** result) = 0;
+#endif
   // Create an object that either appends to an existing file, or
   // writes to a new file (if the file does not exist to begin with).
   // On success, stores a pointer to the new file in *result and
@@ -287,6 +291,9 @@ class LEVELDB_EXPORT WritableFile {
   virtual Status Close() = 0;
   virtual Status Flush() = 0;
   virtual Status Sync() = 0;
+#ifdef MZP
+  virtual Status MoveTo(uint64_t offset) = 0;
+#endif
 };
 
 // An interface for writing log messages.
@@ -352,6 +359,11 @@ class LEVELDB_EXPORT EnvWrapper : public Env {
   Status NewWritableFile(const std::string& f, WritableFile** r) override {
     return target_->NewWritableFile(f, r);
   }
+#ifdef MZP
+  Status NewRandomWritableFile(const std::string& f, WritableFile** r)override {
+    return target_->NewRandomWritableFile(f, r);
+  }
+#endif
   Status NewAppendableFile(const std::string& f, WritableFile** r) override {
     return target_->NewAppendableFile(f, r);
   }

@@ -9,6 +9,40 @@
 
 namespace leveldb {
 
+#ifdef MZP
+void FilterBlockBuilder::AddKey(const Slice& key) {
+  tmp_keys_[key_count_++] = Slice(key.data(), key.size());
+  if (key_count_ == FilterBlockBuilder::kInitKeyCount) {
+    FilterBlockBuilder::kInitKeyCount <<= 1;
+    tmp_keys_.resize(FilterBlockBuilder::kInitKeyCount);
+  }
+}
+
+Slice FilterBlockBuilder::Finish() {
+  if (key_count_ != 0) {
+    policy_->CreateFilter(&tmp_keys_[0], static_cast<int>(key_count_), &result_);
+    tmp_keys_.clear();
+    tmp_keys_.resize(kInitKeyCount);
+    key_count_ = 0;
+  }
+  // PutFixed64(&result_, offset);
+  return Slice(result_);  // 直接就是朴素的二进制过滤器数据，不含其它数据
+}
+
+void FilterBlockBuilder::Reset() {
+  FilterBlockBuilder::kInitKeyCount = 128;
+  result_.clear();
+  key_count_ = 0;
+  tmp_keys_.clear();
+  tmp_keys_.resize(FilterBlockBuilder::kInitKeyCount);
+}
+
+bool FilterBlockReader::KeyMayMatch(const Slice& key, size_t filter_index) {
+  assert(filter_index < filter_.size());
+  return policy_->KeyMayMatch(key, filter_[filter_index]);
+}
+
+#else
 // See doc/table_format.md for an explanation of the filter block format.
 
 // Generate new filter every 2KB of data
@@ -102,5 +136,5 @@ bool FilterBlockReader::KeyMayMatch(uint64_t block_offset, const Slice& key) {
   }
   return true;  // Errors are treated as potential matches
 }
-
+#endif
 }  // namespace leveldb

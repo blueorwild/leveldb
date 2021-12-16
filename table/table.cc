@@ -16,7 +16,434 @@
 #include "util/coding.h"
 
 namespace leveldb {
+#ifdef MZP
+struct Table::Rep {
+  ~Rep() {
+    for (auto &i : index_blocks) {
+      delete i;
+    }
+    for (auto &i : filters) {
+      delete i;
+    }
+    delete index_blocks;
+    delete kv_nums;
+    delete filters;
+  }
 
+  Options options;
+  Status status;
+  RandomAccessFile* file;
+  uint64_t cache_id;
+
+  // 一个新sst可能由多个旧sst构成,所以index是vector
+  // 因为过滤器现在跟data在一起，所以过滤器是二维数组
+  std::vector<IndexBlock*>* index_blocks;
+  std::vector<size_t>* kv_nums; // per old_sst, 为了提前准备空间用
+  std::vector<FilterBlockReader* >* filters;
+};
+
+Status Table::Open(const Options& options, RandomAccessFile* file,
+                   uint64_t size, Table** table) {
+  *table = nullptr;
+  uint64_t header_size = Header::kMaxOldSstableCount * 8 + 4;
+  if (size < Footer::kFooterSize + header_size) {
+    return Status::Corruption("file is too short to be an sstable");
+  }
+
+  // 读 header
+  char header_space[header_size];
+  Slice header_input;
+  Status s = file->Read(0, header_size, &header_input, header_space, true);  // 安全读
+  if (!s.ok()) return s;
+  Header header;
+  s = header.DecodeFrom(&header_input);
+  if (!s.ok()) return s;
+
+  // 读 footer
+  size_t footer_count = header.get_count();
+  const std::vector<uint64_t>& footer_offset = header.get_offset();
+
+  char footer_space[Footer::kFooterSize];
+  Slice footer_input;
+  Footer footer;
+  std::vector<IndexBlock*> tmp_index_blocks(footer_count);
+  std::vector<size_t> tmp_kv_nums(footer_count);
+  std::vector<FilterBlockReader* >* tmp_filters(footer_count);
+
+  for (int i = 0; i < footer_count; ++i){
+    Status s = file->Read(footer_offset[i], Footer::kFooterSize, &footer_input, footer_space);
+    if (!s.ok()) return s;
+
+    s = footer.DecodeFrom(&footer_input);
+    if (!s.ok()) return s;
+
+    tmp_kv_nums[i] = footer.GetKvNum();
+
+    // 读 index_block
+    BlockContents index_block_input;
+    ReadOptions opt;
+    if (options.paranoid_checks) {
+      opt.verify_checksums = true;
+    }
+    s = ReadBlock(file, opt, footer.GetIndexBlockOffset(),
+                  footer.GetIndexBlockSize(), &index_block_input);
+    IndexBlock* index_block = new IndexBlock(index_block_input, footer.GetIndexCount());
+    if (!index_block->vaild()) {
+      s = Status::kCorrupt("bad indexBlock");
+      delete index_block;
+    }
+    if (!s.ok()) {
+      for (int j = 0; j < i; ++j) {
+        delete tmp_index_blocks[j];
+        delete tmp_filters[j];
+      }
+      return s;
+    }
+    // 现在安全了, 然后读过滤器
+    tmp_index_blocks[i] = index_block;
+    ReadFilter(index_block, footer.GetIndexBlockOffset(), &tmp_filters[i]);
+  }
+
+  if (s.ok()) {
+    // We've successfully read the footer and the index block: we're
+    // ready to serve requests.
+    Rep* rep = new Table::Rep;
+    rep->options = options;
+    rep->file = file;
+    rep->cache_id = (options.block_cache ? options.block_cache->NewId() : 0);
+    rep->index_blocks = new std::vector<IndexBlock*>(tmp_index_blocks);
+    rep->kv_nums = new std::vector<size_t>(tmp_kv_nums);
+    rep->filters = new std::vector<FilterBlockReader*>(tmp_filters);
+    *table = new Table(rep);
+  }
+  return s;
+}
+
+void Table::ReadFilter(IndexBlock* index_block, uint64_t index_block_offset,
+                       FilterBlockReader** filter) {
+  // 遍历索引块数组，根据每个索引块计算多个filter的offset和size。
+  if (rep_->options.filter_policy == nullptr) {
+    return;
+  }
+  ReadOptions opt;
+  if (options.paranoid_checks) {
+    opt.verify_checksums = true;
+  }
+
+  std::vector<Slice> *filter_data = new std::vector<Slice>(index_block->GetIndexCount());
+  int i = 0;
+  // filter 没有单独保存offset和size，需要计算
+  uint64_t last_offset, cur_offset, tmp_offset;
+  size_t last_size, cur_size_ tmp_size;
+  BlockContents block;
+  index_block->SeekToFirst();
+  index_block->Current(last_offset, last_size);
+  index_block->Next();
+
+  while (index_block->IterVaild) {
+    index_block->Current(cur_offset, cur_size);
+    tmp_offset = last_offset + last_size + kBlockTrailerSize;
+    tmp_size = cur_offset - tmp_offset - kBlockTrailerSize;
+    if (!ReadBlock(file, opt, tmp_offset, tmp_size, &block).ok) {
+      return;
+    }
+    *filter_data[i++] = block.data;
+
+    last_offset = cur_offset;
+    last_size = cur_size;
+    index_block->Next();
+  }
+  tmp_offset = last_offset + last_size + kBlockTrailerSize;
+  tmp_size = index_block_offset - tmp_offset - kBlockTrailerSize;
+  if (!ReadBlock(file, opt, tmp_offset, tmp_size, &block).ok) {
+    return;
+  }
+  *filter_data[i] = block.data;
+  *filter = new FilterBlockReader(rep_->options.filter_policy, filter_data); 
+}
+
+Table::~Table() { delete rep_; }
+
+static void DeleteBlock(void* arg, void* ignored) {
+  delete reinterpret_cast<Block*>(arg);
+}
+
+static void DeleteCachedBlock(const Slice& key, void* value) {
+  Block* block = reinterpret_cast<Block*>(value);
+  delete block;
+}
+
+static void ReleaseBlock(void* arg, void* h) {
+  Cache* cache = reinterpret_cast<Cache*>(arg);
+  Cache::Handle* handle = reinterpret_cast<Cache::Handle*>(h);
+  cache->Release(handle);
+}
+
+// 麻蛋，这里直接把所有block读出来存到一个vector里就好了(不排序了，提供多路归并的迭代器读)。
+// 专用于compaction，本来就需要全量排序, 单点查找的后面单独写方法。
+class Table::Iter : public Iterator {
+ private:
+  // kv_相当于是多个内部有序的kv数组
+  // 现在要通过迭代器以整体有序的方式访问，维护两级索引即可，一级表示在哪个kv数组，二级就是每个数组一个索引
+  std::vector<std::vector<std::pair<const Slice, const Slice> >* > kv_;
+  size_t first_index_;
+  std::vector<size_t> second_index_;
+
+  const Comparator* comparator_;
+  Status status_;
+
+ public:
+  Iter() {
+    comparator_ = rep_->options.comparator;
+    InitAndRead();
+    first_index_ = kv_.size();
+    second_index_ = std::vector<size_t>(kv_.size(), 0);
+  };
+  ~Iter() {
+    for (auto &i : kv_) {
+      if (i != nullptr) {
+        delete i;
+      }
+    }
+  }
+
+  bool Valid() const override { 
+    if (first_index_ >= kv_.size()) {
+      return false;
+    }
+
+    for (int i = 0; i < second_index_.size(); ++i) {
+      if (second_index_[i] < kv_[i]->size()) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  Status status() const override { return status_; }
+
+  Slice key() const override {
+    assert(Valid());
+    return (*kv_[first_index_])[second_index_].first;
+  }
+
+  Slice value() const override {
+    assert(Valid());
+    return (*kv_[first_index_])[second_index_].second;
+  }
+
+  void SeekToFirst() override {
+    first_index_ = 0;
+    for (auto &i : second_index_) {
+      i = 0;
+    }
+    FindSmallest();
+  }
+
+  void Next() override {
+    assert(Valid());
+    second_index_[first_index_] += 1;
+    FindSmallest();
+  }
+
+  // 暂时不需要
+  void Prev() override {}
+  void Seek(const Slice& target) override {}
+  void SeekToLast() override {}
+
+ private:
+  void InitAndRead() {
+    size_t old_sst_count = rep_->index_blocks->size();
+    kv_.Resize(old_sst_count);
+    for (int i = 0; i < old_sst_count; ++i) {
+      // 初始化大小，避免频繁扩张拷贝，也是Footer中特意存储kv_num的原因
+      kv_[i] = new std::vector<std::pair<const Slice, const Slice> >(rep_->kv_nums[i]);
+
+      // 然后每个index块对应的多个data块解析出来，放进上面new的vector里
+      Cache* block_cache = rep_->options.block_cache;
+      Cache::Handle* cache_handle = nullptr;
+      Block* block = nullptr;
+
+      IndexBlock* index_iter = *(rep_->index_blocks)[i];  // 伪迭代器哈
+      uint64_t data_block_offset = 0;
+      size_t data_block_size = 0;
+      idex_iter->SeekToFirst();
+      size_t cur_index = 0;
+      while (idex_iter->IterVaild()) {
+        idex_iter->Current(data_block_offset, data_block_size);
+        idex_iter->Next();
+
+        if (block_cache != nullptr) {
+          // 此表有过缓存，看看具体的data block在不在缓存，在的话就直接用
+          char cache_key_buffer[16];
+          EncodeFixed64(cache_key_buffer, rep_->cache_id);
+          EncodeFixed64(cache_key_buffer + 8, data_block_offset);
+          Slice key(cache_key_buffer, 16);
+          cache_handle = block_cache->Lookup(key);
+          if (cache_handle != nullptr) {
+            block = reinterpret_cast<Block*>(block_cache->Value(cache_handle));
+          } 
+        }
+        if (block == nullptr) {
+          // 可能是表没缓存，也可能是表有但具体的数据块被冲掉了
+          BlockContents contents;
+          s = ReadBlock(rep_->file, options, data_block_offset, data_block_size, &contents);
+          if (s.ok()) {
+            block = new Block(contents);
+          }
+        }
+
+        // 现在数据块拿到了，然后就逐条解析出来放到kv[i]里
+        // 因为一个索引块对应的肯定是有序的，所以追加就行
+        if (block != nullptr) {
+          block->SeqReadKV(kv_[i], cur_index);
+          // 清理读取解析block过程中的内存和引用计数
+          // 现在已经保存在kv_中了，与底层无关了。
+          if (cache_handle == nullptr) {
+            DeleteBlock(block);
+          } else {
+            ReleaseBlock(block_cache, cache_handle);
+          }
+        } else {
+          rep_->status = Status::Corruption("create table iter, but InitRead fail, block not exist");
+          return;
+        }
+      }
+      assert(cur_index == rep_->kv_nums[i]);
+    }
+  }
+  
+  inline int Compare(const Slice& a, const Slice& b) const {
+    return comparator_->Compare(a, b);
+  }
+
+  void FindSmallest() {
+    assert(Valid());
+    int tmp_index = -1;
+    for (int i = 0; i < second_index_.size(); ++i) {
+      if (second_index_[i] < (*kv_[i]).size()) {
+        if (tmp_index < 0 || 
+            Compare((*kv_[i])[second_index_[i]].first, (*kv_[i])[second_index_[tmp_index]].first) < 0) {
+          tmp_index = i;
+        }
+      }
+    }
+    first_index_ = tmp_index;
+  }
+};
+
+Iterator* Table::NewIterator(const ReadOptions& options) const {
+  return new Iter();
+}
+
+Iterator* Table::BlockReader(void* arg, const ReadOptions& options,
+                             uint64_t offset, size_t size) {
+  Table* table = reinterpret_cast<Table*>(arg);
+  Cache* block_cache = table->rep_->options.block_cache;
+  Block* block = nullptr;
+  Cache::Handle* cache_handle = nullptr;
+  
+  if (block_cache != nullptr) {
+    BlockContents contents;
+    char cache_key_buffer[16];
+    EncodeFixed64(cache_key_buffer, table->rep_->cache_id);
+    EncodeFixed64(cache_key_buffer + 8, offset);
+    Slice key(cache_key_buffer, sizeof(cache_key_buffer));
+    cache_handle = block_cache->Lookup(key);
+    if (cache_handle != nullptr) {
+      block = reinterpret_cast<Block*>(block_cache->Value(cache_handle));
+    } else {
+      s = ReadBlock(table->rep_->file, options, offset, size, &contents);
+      if (s.ok()) {
+        block = new Block(contents);
+        if (contents.cachable && options.fill_cache) {
+          cache_handle = block_cache->Insert(key, block, block->size(),
+                                              &DeleteCachedBlock);
+        }
+      }
+    }
+  } else {
+    s = ReadBlock(table->rep_->file, options, offset, size, &contents);
+    if (s.ok()) {
+      block = new Block(contents);
+    }
+  }
+
+  Iterator* iter;
+  if (block != nullptr) {
+    iter = block->NewIterator(table->rep_->options.comparator);
+    if (cache_handle == nullptr) {
+      iter->RegisterCleanup(&DeleteBlock, block, nullptr);
+    } else {
+      iter->RegisterCleanup(&ReleaseBlock, block_cache, cache_handle);
+    }
+  } else {
+    iter = NewErrorIterator(s);
+  }
+  return iter;
+}
+
+Status Table::InternalGet(const ReadOptions& options, const Slice& k, void* arg,
+                          void (*handle_result)(void*, const Slice&, const Slice&)) {
+  // 原来的方式文件单纯，封装的也比较好，所以就是先index迭代器，然后datablockReader就搞定了。
+  // 现在需要遍历多个index
+  Status s;
+  auto cmp = rep_->options.comparator;
+  uint64_t offset;
+  size_t size;
+  Block* block = nullptr;
+  Cache::Handle* cache_handle = nullptr;
+
+  for (int i = 0; i < rep_->index_blocks->size(); ++i) {
+    int j = *(rep_->index_blocks)[i]->Seek(cmp, k, offset, size); 
+    if (j > 0) {
+      // 如果某个索引中存在，先读过滤器
+      if (rep_->filters == nullptr || *(rep_->filters)[i]->KeyMayMatch(k, j)) {
+        // 过滤器不存在或者存在且找到，则去数据块中找
+        // 先去可能存在的缓存看看
+        Iterator* block_iter = BlockReader(this, options, iiter->value());
+        block_iter->Seek(k);
+        if (block_iter->Valid()) {
+          (*handle_result)(arg, block_iter->key(), block_iter->value());
+        }
+        s = block_iter->status();
+        delete block_iter;
+        if (block_iter->Valid()) {
+          break;
+        }
+      }
+    }
+  }
+  return s;
+}
+
+uint64_t Table::ApproximateOffsetOf(const Slice& key) const {
+  Iterator* index_iter =
+      rep_->index_block->NewIterator(rep_->options.comparator);
+  index_iter->Seek(key);
+  uint64_t result;
+  if (index_iter->Valid()) {
+    BlockHandle handle;
+    Slice input = index_iter->value();
+    Status s = handle.DecodeFrom(&input);
+    if (s.ok()) {
+      result = handle.offset();
+    } else {
+      // Strange: we can't decode the block handle in the index block.
+      // We'll just return the offset of the metaindex block, which is
+      // close to the whole file size for this case.
+      result = rep_->metaindex_handle.offset();
+    }
+  } else {
+    // key is past the last key in the file.  Approximate the offset
+    // by returning the offset of the metaindex block (which is
+    // right near the end of the file).
+    result = rep_->metaindex_handle.offset();
+  }
+  delete index_iter;
+  return result;
+}
+#else
 struct Table::Rep {
   ~Rep() {
     delete filter;
@@ -268,4 +695,5 @@ uint64_t Table::ApproximateOffsetOf(const Slice& key) const {
   return result;
 }
 
+#endif
 }  // namespace leveldb

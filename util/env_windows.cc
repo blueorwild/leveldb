@@ -450,7 +450,9 @@ class WindowsEnv : public Env {
     *result = new WindowsWritableFile(filename, std::move(handle));
     return Status::OK();
   }
-
+#ifdef MZP
+  Status NewRandomWritableFile(const std::string& f, WritableFile** r) override {}
+#endif
   Status NewAppendableFile(const std::string& filename,
                            WritableFile** result) override {
     DWORD desired_access = FILE_APPEND_DATA;

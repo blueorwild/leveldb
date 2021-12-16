@@ -79,11 +79,21 @@ class LEVELDB_EXPORT TableBuilder {
   // Finish() call, returns the size of the final generated file.
   uint64_t FileSize() const;
 
+#ifdef MZP
+  void MoveToEnd();
+  // 专用于追加合并时的文件结束，区别就是更改Header，而不是写新的Header
+  Status AppendFinish(size_t sst_count);
+#endif
+
  private:
   bool ok() const { return status().ok(); }
+#ifdef MZP
+  // 写一个data block 和相关的filter 到文件，并计算索引
+  void WriteBlock();
+#else
   void WriteBlock(BlockBuilder* block, BlockHandle* handle);
   void WriteRawBlock(const Slice& data, CompressionType, BlockHandle* handle);
-
+#endif
   struct Rep;
   Rep* rep_;
 };

@@ -11,6 +11,84 @@
 namespace leveldb {
 
 namespace {
+#ifdef MZP
+class MergingIterator : public Iterator {
+ private:
+  // children_相当于是多个内部有序的迭代器
+  // 现在要通过迭代器以整体有序的方式访问，维护一个当前迭代器即可
+  std::vector<Iterator* > children_;
+  Iterator* current_;
+
+  const Comparator* comparator_;
+  Status status_;
+
+ public:
+  MergingIterator(const Comparator* comparator, Iterator** children, int n)
+      : current_(nullptr), comparator_(comparator) {
+    children_.resize(n);
+    for (int i = 0; i < n; ++i) {
+      children_[i] = children[i];
+    }
+  }
+
+  ~MergingIterator() override {}
+
+  Slice key() const override {
+    assert(Valid());
+    return current_->key();
+  }
+
+  Slice value() const override {
+    assert(Valid());
+    return current_->value();
+  }
+
+  bool Valid() const override { return current_ != nullptr; }
+
+  void SeekToFirst() override {
+    for (auto &Iter : children_) {
+      Iter->SeekToFirst();
+    }
+    FindSmallest();
+  }
+
+  void Next() override {
+    assert(Valid());
+    current_->Next();
+    FindSmallest();
+  }
+
+  Status status() const override {
+    for (auto &Iter : children_) {
+      status_ = Iter->status();
+      if (!status.ok()) {
+        break;
+      }
+    }
+    return status;
+  }
+
+  // 暂时不需要
+  void SeekToLast() override {}
+  void Seek(const Slice& target) override {}
+  void Prev() override {}
+
+ private:
+  void FindSmallest() {
+    IteratorWrapper* smallest = nullptr;
+    for (auto &Iter : children_) {
+      if (Iter->Valid()) {
+        if (smallest == nullptr || comparator_->Compare(Iter->key(), smallest->key()) < 0) {
+          smallest = child;
+        }
+      }
+    }
+    current_ = smallest;
+  }
+ 
+};
+
+#else
 class MergingIterator : public Iterator {
  public:
   MergingIterator(const Comparator* comparator, Iterator** children, int n)
@@ -174,6 +252,7 @@ void MergingIterator::FindLargest() {
   }
   current_ = largest;
 }
+#endif
 }  // namespace
 
 Iterator* NewMergingIterator(const Comparator* comparator, Iterator** children,

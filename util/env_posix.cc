@@ -146,7 +146,25 @@ class PosixSequentialFile final : public SequentialFile {
 // API. Instances are immutable and Read() only calls thread-safe library
 // functions.
 class PosixRandomAccessFile final : public RandomAccessFile {
+#ifdef MZP
+ private:
+  port::Mutex* header_mutex_;
+#endif
  public:
+#ifdef MZP
+  PosixRandomAccessFile(std::string filename, int fd, Limiter* fd_limiter,
+                        port::Mutex* header_mutex)
+      : has_permanent_fd_(fd_limiter->Acquire()),
+        fd_(has_permanent_fd_ ? fd : -1),
+        fd_limiter_(fd_limiter),
+        filename_(std::move(filename)),
+        header_mutex_(header_mutex) {
+    if (!has_permanent_fd_) {
+      assert(fd_ == -1);
+      ::close(fd);  // The file will be opened on every read.
+    }
+  }
+#else
   // The new instance takes ownership of |fd|. |fd_limiter| must outlive this
   // instance, and will be used to determine if .
   PosixRandomAccessFile(std::string filename, int fd, Limiter* fd_limiter)
@@ -159,6 +177,7 @@ class PosixRandomAccessFile final : public RandomAccessFile {
       ::close(fd);  // The file will be opened on every read.
     }
   }
+#endif
 
   ~PosixRandomAccessFile() override {
     if (has_permanent_fd_) {
@@ -195,6 +214,20 @@ class PosixRandomAccessFile final : public RandomAccessFile {
     return status;
   }
 
+#ifdef MZP
+  Status Read(uint64_t offset, size_t n, Slice* result,
+              char* scratch, bool lock) const override {
+    if (lock) {
+      header_mutex_->lock();
+    }
+    Status s = Read(offset, n, result, scratch);
+    if (lock) {
+      header_mutex_->unlock();
+    }
+    return s;
+  }
+#endif
+
  private:
   const bool has_permanent_fd_;  // If false, the file is opened on every read.
   const int fd_;                 // -1 if has_permanent_fd_ is false.
@@ -208,7 +241,20 @@ class PosixRandomAccessFile final : public RandomAccessFile {
 // API. Instances are immutable and Read() only calls thread-safe library
 // functions.
 class PosixMmapReadableFile final : public RandomAccessFile {
+#ifdef MZP
+ private:
+  port::Mutex* header_mutex_;
+#endif
  public:
+#ifdef MZP
+  PosixMmapReadableFile(std::string filename, char* mmap_base, size_t length,
+                        Limiter* mmap_limiter, port::Mutex* header_mutex)
+      : mmap_base_(mmap_base),
+        length_(length),
+        mmap_limiter_(mmap_limiter),
+        filename_(std::move(filename)),
+        header_mutex_(header_mutex) {}
+#else
   // mmap_base[0, length-1] points to the memory-mapped contents of the file. It
   // must be the result of a successful call to mmap(). This instances takes
   // over the ownership of the region.
@@ -222,7 +268,7 @@ class PosixMmapReadableFile final : public RandomAccessFile {
         length_(length),
         mmap_limiter_(mmap_limiter),
         filename_(std::move(filename)) {}
-
+#endif
   ~PosixMmapReadableFile() override {
     ::munmap(static_cast<void*>(mmap_base_), length_);
     mmap_limiter_->Release();
@@ -238,6 +284,19 @@ class PosixMmapReadableFile final : public RandomAccessFile {
     *result = Slice(mmap_base_ + offset, n);
     return Status::OK();
   }
+#ifdef MZP
+  Status Read(uint64_t offset, size_t n, Slice* result,
+              char* scratch, bool lock) const override {
+    if (lock) {
+      header_mutex_->lock();
+    }
+    Status s = Read(offset, n, result, scratch);
+    if (lock) {
+      header_mutex_->unlock();
+    }
+    return s;
+  }
+#endif
 
  private:
   char* const mmap_base_;
@@ -247,13 +306,27 @@ class PosixMmapReadableFile final : public RandomAccessFile {
 };
 
 class PosixWritableFile final : public WritableFile {
+#ifdef MZP
+ private:
+  port::Mutex* header_mutex_;
+#endif
  public:
-  PosixWritableFile(std::string filename, int fd)
+#ifdef MZP
+ PosixWritableFile(std::string filename, int fd, port::Mutex* header_mutex)
+      : pos_(0),
+        fd_(fd),
+        is_manifest_(IsManifest(filename)),
+        filename_(std::move(filename)),
+        dirname_(Dirname(filename_)),
+        header_mutex_(header_mutex) {}
+#else
+ PosixWritableFile(std::string filename, int fd)
       : pos_(0),
         fd_(fd),
         is_manifest_(IsManifest(filename)),
         filename_(std::move(filename)),
         dirname_(Dirname(filename_)) {}
+#endif
 
   ~PosixWritableFile() override {
     if (fd_ >= 0) {
@@ -302,6 +375,18 @@ class PosixWritableFile final : public WritableFile {
   }
 
   Status Flush() override { return FlushBuffer(); }
+#ifdef MZP
+  Status Flush(bool lock) {
+    if (lock) {
+      header_mutex_->lock();
+    }
+    Status s = FlushBuffer();
+    if (lock) {
+      header_mutex_->unlock();
+    }
+    return s;
+  }
+#endif
 
   Status Sync() override {
     // Ensure new files referred to by the manifest are in the filesystem.
@@ -321,6 +406,25 @@ class PosixWritableFile final : public WritableFile {
 
     return SyncFd(fd_, filename_);
   }
+
+#ifdef MZP
+  Status MoveTo(uint64_t offset) {
+    // 把文件读写指针移动到指定偏移（相对于文件起始位置）
+    if (::lseek(fd_, offset, SEEK_SET) == -1) {
+      return Status::IOError(filename_, Slice("lseek fail"));
+    } else {
+      return Status::OK();
+    }
+  }
+  Status MoveToEnd(uint64_t &file_size) {
+    file_size = ::lseek(fd_, 0, SEEK_END);
+    if (file_size == -1) {
+      return Status::IOError(filename_, Slice("lseek fail"));
+    } else {
+      return Status::OK();
+    }
+  }
+#endif
 
  private:
   Status FlushBuffer() {
@@ -518,7 +622,12 @@ class PosixEnv : public Env {
     }
 
     if (!mmap_limiter_.Acquire()) {
+#ifdef MZP
+      *result = new PosixRandomAccessFile(filename, fd, &fd_limiter_, &header_mutex_);
+#else
       *result = new PosixRandomAccessFile(filename, fd, &fd_limiter_);
+#endif
+      
       return Status::OK();
     }
 
@@ -528,9 +637,15 @@ class PosixEnv : public Env {
       void* mmap_base =
           ::mmap(/*addr=*/nullptr, file_size, PROT_READ, MAP_SHARED, fd, 0);
       if (mmap_base != MAP_FAILED) {
+#ifdef MZP
+        *result = new PosixMmapReadableFile(filename,
+                                            reinterpret_cast<char*>(mmap_base),
+                                            file_size, &mmap_limiter_, &header_mutex_);
+#else
         *result = new PosixMmapReadableFile(filename,
                                             reinterpret_cast<char*>(mmap_base),
                                             file_size, &mmap_limiter_);
+#endif
       } else {
         status = PosixError(filename, errno);
       }
@@ -554,6 +669,21 @@ class PosixEnv : public Env {
     *result = new PosixWritableFile(filename, fd);
     return Status::OK();
   }
+
+#ifdef MZP
+  Status NewRandomWritableFile(const std::string& filename,
+                               WritableFile** result) override {
+    int fd = ::open(filename.c_str(),
+                    O_WRONLY | O_CREAT | kOpenBaseFlags, 0644);
+    if (fd < 0) {
+      *result = nullptr;
+      return PosixError(filename, errno);
+    }
+
+    *result = new PosixWritableFile(filename, fd, &header_mutex_);
+    return Status::OK();
+  }
+#endif
 
   Status NewAppendableFile(const std::string& filename,
                            WritableFile** result) override {
@@ -737,6 +867,9 @@ class PosixEnv : public Env {
     void* const arg;
   };
 
+#ifdef MZP
+  port::Mutex header_mutex_;
+#endif
   port::Mutex background_work_mutex_;
   port::CondVar background_work_cv_ GUARDED_BY(background_work_mutex_);
   bool started_background_thread_ GUARDED_BY(background_work_mutex_);

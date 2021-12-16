@@ -97,6 +97,15 @@ class Version {
       const InternalKey* end,    // nullptr means after all keys
       std::vector<FileMetaData*>* inputs);
 
+#ifdef MZP
+  // 找出在范围内的文件，上面那个是范围交叠，并且会更新边界
+  void GetIncludeInputs(
+      int level,
+      const InternalKey &begin,  // nullptr means before all keys
+      const InternalKey &end,    // nullptr means after all keys
+      std::vector<FileMetaData*>* inputs);
+#endif
+
   // Returns true iff some file in the specified level overlaps
   // some part of [*smallest_user_key,*largest_user_key].
   // smallest_user_key==nullptr represents a key smaller than all the DB's keys.
@@ -246,7 +255,11 @@ class VersionSet {
 
   // Create an iterator that reads over the compaction inputs for "*c".
   // The caller should delete the iterator when no longer needed.
+#ifdef MZP
+  Iterator* MakeInputIterator(Compaction* c, std::set<FileMetaData*> &inputs1_clean_files);
+#else
   Iterator* MakeInputIterator(Compaction* c);
+#endif
 
   // Returns true iff some level needs a compaction.
   bool NeedsCompaction() const {
@@ -342,7 +355,11 @@ class Compaction {
   bool IsTrivialMove() const;
 
   // Add all inputs to this compaction as delete operations to *edit.
+#ifdef MZP
+  void AddInputDeletions(VersionEdit* edit, std::set<FileMetaData*> &inputs1_clean_files);
+#else
   void AddInputDeletions(VersionEdit* edit);
+#endif
 
   // Returns true if the information we have available guarantees that
   // the compaction is producing data in "level+1" for which no data exists

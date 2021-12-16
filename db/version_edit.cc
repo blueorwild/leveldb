@@ -36,6 +36,9 @@ void VersionEdit::Clear() {
   has_last_sequence_ = false;
   deleted_files_.clear();
   new_files_.clear();
+#ifdef MZP
+  alter_files_.clear();
+#endif
 }
 
 void VersionEdit::EncodeTo(std::string* dst) const {

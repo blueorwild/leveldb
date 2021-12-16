@@ -140,6 +140,14 @@ struct LEVELDB_EXPORT Options {
   // Many applications will benefit from passing the result of
   // NewBloomFilterPolicy() here.
   const FilterPolicy* filter_policy = nullptr;
+
+#ifdef MZP
+  // 新的sstable需要一个header,  包含4字节count， 和count个8字节的offset，
+  // 表示该sstable由count个旧sstable组成。 offset即旧sstable的Footer的偏移
+  // count 最大12个。  header 是定长100字节。
+  // 如果改了这里，则format.h 里的Header 也要联动改动
+  const size_t header_size = 100;
+#endif
 };
 
 // Options that control read operations

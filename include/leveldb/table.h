@@ -59,10 +59,14 @@ class LEVELDB_EXPORT Table {
   uint64_t ApproximateOffsetOf(const Slice& key) const;
 
  private:
+#ifdef MZP
+  // 因为结构改了，这里迭代器也需要改一下
+  class Iter;
+#endif
   friend class TableCache;
   struct Rep;
 
-  static Iterator* BlockReader(void*, const ReadOptions&, const Slice&);
+  
 
   explicit Table(Rep* rep) : rep_(rep) {}
 
@@ -72,9 +76,15 @@ class LEVELDB_EXPORT Table {
   Status InternalGet(const ReadOptions&, const Slice& key, void* arg,
                      void (*handle_result)(void* arg, const Slice& k,
                                            const Slice& v));
-
+#ifdef MZP
+  static Iterator* Table::BlockReader(void*, const ReadOptions&, uint64_t, size_t);
+  void ReadFilter(IndexBlock* index_block, uint64_t index_block_offset,
+                  FilterBlockReader* &filter);
+#else
   void ReadMeta(const Footer& footer);
   void ReadFilter(const Slice& filter_handle_value);
+  static Iterator* BlockReader(void*, const ReadOptions&, const Slice&);
+#endif
 
   Rep* const rep_;
 };

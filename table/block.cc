@@ -289,4 +289,104 @@ Iterator* Block::NewIterator(const Comparator* comparator) {
   }
 }
 
+#ifdef MZP
+// 专用于data block,不想用迭代器了，直接依次读到传进来的容器里。
+void Block::SeqReadKV(std::vector<std::pair<Slice, Slice> > &kv, size_t &index) {
+  const char* cur = data_;
+  const char* end = data_ + restart_offset_;
+
+  // PutVarint32(&buffer_, shared);
+  // PutVarint32(&buffer_, non_shared);
+  // PutVarint32(&buffer_, value.size());
+  // buffer_.append(key.data() + shared, non_shared);
+  // buffer_.append(value.data(), value.size());
+
+  std::string last_key("");
+  size_t shared_len = 0, non_shared_len = 0, value_len = 0;
+  while (cur < end) {
+    cur = GetVarint32Ptr(cur, end, &shared_len);
+    cur = GetVarint32Ptr(cur, end, &non_shared_len);
+    cur = GetVarint32Ptr(cur, end, &value_len);
+
+    last_key.resize(shared_len);
+    last_key.append(cur, non_shared_len);
+    cur += non_shared_len;
+    kv[index++] = std::pair<Slice, Slice>(last_key, Slice(cur, value_len));
+    cur += value_len;
+  }
+  assert(cur == end);
+}
+
+IndexBlock::IndexBlock(const BlockContents& contents, size_t index_count) {
+  owned_ = contents.heap_allocated;
+  data_ = contents.data.data();
+  keys_.resize(index_count);
+  offsets_.resize(index_count);
+  sizes_.resize(index_count);
+  index_count_ = index_count;
+  current_ = 0;
+
+  const char* cur = data_, *end = cur + contents.data.size();
+  for (int i = 0; i < index_count; ++i) {
+    // key len
+    uint32_t value = 0;
+    cur = GetVarint32Ptr(cur, end, &value);
+    if (!cur) {  // bad index_block format
+      index_count_ = 0;
+      break;
+    }
+    // key
+    keys_[i] = Slice(cur, value);
+    cur += value;
+    // offset
+    cur = GetVarint64Ptr(cur, end, &offsets_[i]);
+    if (!cur) {  // bad index_block format
+      index_count_ = 0;
+      break;
+    }
+    // size
+    cur = GetVarint32Ptr(cur, end, &sizes_[i]);
+    if (!cur) {  // bad index_block format
+      index_count_ = 0;
+      break;
+    }
+  }
+
+  if (cur != end) {
+    index_count_ = 0;
+  }
+}
+
+IndexBlock::~IndexBlock() {
+  if (owned_) {
+    delete[] data_;
+  }
+}
+
+const Slice& IndexBlock::Current(uint64_t &offset, size_t &size) {
+  assert(IterVaild());
+  offset = offsets_[current_];
+  size = sizes_[current_];
+  return keys_[current_];
+}
+int IndexBlock::Seek(const Comparator* comparator, const Slice &key, 
+                      uint64_t &offset, size_t &size) {
+  if (index_count_ <= 0) {
+    return -1;
+  }
+  // 懒得用二分了
+  if (comparator->Compare(keys_[index_count_ - 1], keyIn) < 0) {
+    return -1;
+  }
+  for (int i = 0; i < index_count_; ++i) {
+    if (comparator->Compare(key, keys_[i]) <= 0) {
+      offset = offset_[i];
+      size = size_[i];
+      return i;
+    }
+  }
+  return -1;
+}
+#endif
+
 }  // namespace leveldb

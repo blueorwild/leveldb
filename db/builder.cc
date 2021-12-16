@@ -18,6 +18,9 @@ Status BuildTable(const std::string& dbname, Env* env, const Options& options,
                   TableCache* table_cache, Iterator* iter, FileMetaData* meta) {
   Status s;
   meta->file_size = 0;
+#ifdef MZP
+  meta->sst_count = 0;
+#endif
   iter->SeekToFirst();
 
   std::string fname = TableFileName(dbname, meta->number);
@@ -43,6 +46,9 @@ Status BuildTable(const std::string& dbname, Env* env, const Options& options,
     s = builder->Finish();
     if (s.ok()) {
       meta->file_size = builder->FileSize();
+#ifdef MZP
+      meta->sst_count = 1;  // 新创建的新sst仅有一个旧sst
+#endif
       assert(meta->file_size > 0);
     }
     delete builder;
@@ -57,6 +63,14 @@ Status BuildTable(const std::string& dbname, Env* env, const Options& options,
     delete file;
     file = nullptr;
 
+#ifdef MZP
+    if (s.ok()) {
+      // Verify that the table is usable
+      Cache::Handle* handle = nullptr;
+      s = table_cache->FindTable(file_number, file_size, &handle);
+      table_cache->ReleaseHandle(handle);  // just verify
+    }
+#else
     if (s.ok()) {
       // Verify that the table is usable
       Iterator* it = table_cache->NewIterator(ReadOptions(), meta->number,
@@ -64,6 +78,7 @@ Status BuildTable(const std::string& dbname, Env* env, const Options& options,
       s = it->status();
       delete it;
     }
+#endif
   }
 
   // Check for input iterator errors

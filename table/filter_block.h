@@ -21,6 +21,44 @@ namespace leveldb {
 
 class FilterPolicy;
 
+#ifdef MZP
+class FilterBlockBuilder {
+ public:
+  
+  explicit FilterBlockBuilder(const FilterPolicy*) : policy_(policy), key_count_(0) {
+    tmp_keys_.resize(kInitKeyCount);   // 减缓频繁扩容
+  };
+
+  FilterBlockBuilder(const FilterBlockBuilder&) = delete;
+  FilterBlockBuilder& operator=(const FilterBlockBuilder&) = delete;
+
+  void AddKey(const Slice& key);
+  Slice Finish();
+  void Reset();
+
+ private:
+  static int kInitKeyCount = 128;
+
+  const FilterPolicy* policy_;
+  std::string result_;           // Filter data computed so far
+  size_t key_count_;
+  std::vector<Slice> tmp_keys_;  // policy_->CreateFilter() argument
+};
+
+// 这里应该是一个过滤器数组，一个 single sstable 的每个datablock都有一个。
+class FilterBlockReader {
+ public:
+  // REQUIRES: "contents" and *policy must stay live while *this is live.
+  FilterBlockReader(const FilterPolicy* policy, const std::vector<const Slice>* filter):
+                    policy_(policy), filter_(filter) {};
+  ~FilterBlockReader() { delete filter_; };
+  bool KeyMayMatch(const Slice& key, size_t filter_index);
+
+ private:
+  const FilterPolicy* policy_;
+  const std::vector<const Slice>* filter_;    // Pointer to filter data (at block-start)
+};
+#else
 // A FilterBlockBuilder is used to construct all of the filters for a
 // particular Table.  It generates a single string which is stored as
 // a special block in the Table.
@@ -62,7 +100,7 @@ class FilterBlockReader {
   size_t num_;          // Number of entries in offset array
   size_t base_lg_;      // Encoding parameter (see kFilterBaseLg in .cc file)
 };
-
+#endif
 }  // namespace leveldb
 
 #endif  // STORAGE_LEVELDB_TABLE_FILTER_BLOCK_H_

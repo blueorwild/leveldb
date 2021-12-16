@@ -104,4 +104,29 @@ void BlockBuilder::Add(const Slice& key, const Slice& value) {
   counter_++;
 }
 
+#ifdef MZP
+void IndexBlockBuilder::Reset() {
+  buffer_.clear();
+  finished_ = false;
+  index_count_ = 0;
+}
+
+void IndexBlockBuilder::Add() {
+  assert(!finished_);
+  
+  // Add "<key_size><key><offset><size>" to buffer_
+  PutVarint32(&buffer_, tmp_key_.size());
+  buffer_.append(tmp_key_.data(), tmp_key_.size());
+  PutVarint64(&buffer_, tmp_offset_);
+  PutVarint32(&buffer_, tmp_block_size_);
+  ++index_count_;
+}
+
+Slice IndexBlockBuilder::Finish() {
+  finished_ = true;
+  return Slice(buffer_);
+}
+
+#endif
+
 }  // namespace leveldb

@@ -148,6 +148,12 @@ class DBImpl : public DB {
 
   Status OpenCompactionOutputFile(CompactionState* compact);
   Status FinishCompactionOutputFile(CompactionState* compact, Iterator* input);
+#ifdef MZP
+  Status OpenAppendOutputFile(CompactionState* compact, FileMetaData* f);
+  Status FinishAppendOutputFile(CompactionState* compact, Iterator* input);
+  Status InstallCompactionResults(CompactionState* compact,
+    std::vector<FileMetaData*> inputs1_clean_files) EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+#endif
   Status InstallCompactionResults(CompactionState* compact)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
@@ -191,6 +197,10 @@ class DBImpl : public DB {
   // Set of table files to protect from deletion because they are
   // part of ongoing compactions.
   std::set<uint64_t> pending_outputs_ GUARDED_BY(mutex_);
+#ifdef MZP
+  // 维护待更改的文件（compaction上层追加到下层）
+  std::set<FileMetaData*> pending_alters_ GUARDED_BY(mutex_);
+#endif
 
   // Has a background compaction been scheduled or is running?
   bool background_compaction_scheduled_ GUARDED_BY(mutex_);
