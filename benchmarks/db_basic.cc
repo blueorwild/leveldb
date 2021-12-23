@@ -27,8 +27,9 @@ using std::endl;
 int main(){
     leveldb::DB* db = nullptr;
     leveldb::Options options;
+    options.filter_policy = leveldb::NewBloomFilterPolicy(4);
     options.create_if_missing = true;
-    string db_path = "/root/leveldb/mzp_test/testdb";
+    string db_path = "/root/leveldb_m/mzp_test/testdb";
     leveldb::Status s = leveldb::DB::Open(options, db_path, &db);
     if(!s.ok()){
         cout << s.ToString() << endl;
@@ -39,8 +40,10 @@ int main(){
     string value = "test_value";
     string get;
 
-    for (int i = 1 ; i <= 1000; ++i) {
+    for (int i = 1 ; i <= 170000; ++i) {
+        key.resize(8);
         value.resize(10);
+        key += std::to_string(i);
         value += std::to_string(i);
         s = db->Put(leveldb::WriteOptions(), key, value);
         if(!s.ok()){
@@ -48,20 +51,24 @@ int main(){
             return 0;
         }
     }
+    
+    // s = db->Write(leveldb::WriteOptions(), nullptr);  // try to force flush
+    sleep(5);
 
-    s = db->Write(leveldb::WriteOptions(), nullptr);  // try to force flush
     if(!s.ok()){
         cout << s.ToString() << endl;
         return 0;
     }
-
+    
+    key = "test_key100000";
     s = db->Get(leveldb::ReadOptions(), key, &get);
     if(!s.ok()){
         cout << s.ToString() << endl;
         return 0;
     }
     cout << "find key:  "<< key << " value is: " << get << endl;
-
+    s = db->Write(leveldb::WriteOptions(), nullptr);  // try to force flush
     sleep(3);
+    
     return 0;
 }

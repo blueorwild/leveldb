@@ -83,11 +83,13 @@ Status ReadBlock(RandomAccessFile* file, const ReadOptions& options,
     case kSnappyCompression: {
       size_t ulength = 0;
       if (!port::Snappy_GetUncompressedLength(data, n, &ulength)) {
+        std::cout << "2-1" << std::endl;
         delete[] buf;
         return Status::Corruption("corrupted compressed block contents");
       }
       char* ubuf = new char[ulength];
       if (!port::Snappy_Uncompress(data, n, ubuf)) {
+        std::cout << "2-2" << std::endl;
         delete[] buf;
         delete[] ubuf;
         return Status::Corruption("corrupted compressed block contents");
@@ -106,30 +108,20 @@ Status ReadBlock(RandomAccessFile* file, const ReadOptions& options,
   return Status::OK();
 }
 
-void Header::Append(uint64_t offset) {
-  offset_[count_++] = offset;
-}
-
-void Header::EncodeTo(std::string* dst) const {
-  PutFixed32(dst, count_);
-  for (int i = 0; i < count_; ++i) {
-    PutFixed64(dst, offset_[i]);
-  }
-  dst.resize(kMaxOldSstableCount * 8 + 4); // Padding
-}
-
 Status Header::DecodeFrom(Slice* input) {
+  assert(input->size() == kMaxOldSstableCount * 8 + 4);
   const char* ptr = input->data();
   count_ = DecodeFixed32(ptr);
-  if (count_ <= 0 || count_ >= kMaxOldSstableCount) {
+  if (count_ <= 0 || count_ > kMaxOldSstableCount) {
     return Status::Corruption("bad Header");
   }
-  offset_[0] = DecodeFixed64(ptr + 4);
-  for (int i = 1; i < count_; ++i) {
-    offset_[i] = DecodeFixed64(ptr + 8);
+  ptr += 4;
+  for (int i = 0; i < count_; ++i) {
+    offset_[i] = DecodeFixed64(ptr);
     if (offset_[i] < 0) {
       return Status::Corruption("bad Header");
     }
+    ptr += 8;
   }
   return Status::OK();
 }
@@ -156,11 +148,11 @@ Status Footer::DecodeFrom(Slice* input) {
     return Status::Corruption("not an sstable (bad magic number)");
   }
   
-  size_t filter_name_len = 0;
+  uint32_t filter_name_len = 0;
   if (GetVarint64(input, &index_block_offset_) && GetVarint32(input, &index_block_size_)
-      && GetVarint32(input, &index_count_) && GetVarint32(input, &kv_num_
+      && GetVarint32(input, &index_count_) && GetVarint32(input, &kv_num_)
       && GetVarint32(input, &filter_name_len)) {
-    filter_name_ = Slice(input.data(), filter_name_len);
+    filter_name_ = std::string(input->data(), filter_name_len);
     return Status::OK();
   } else {
     return Status::Corruption("bad Footer");

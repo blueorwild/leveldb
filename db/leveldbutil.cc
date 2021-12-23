@@ -20,6 +20,12 @@ class StdoutPrinter : public WritableFile {
   Status Close() override { return Status::OK(); }
   Status Flush() override { return Status::OK(); }
   Status Sync() override { return Status::OK(); }
+
+#ifdef MZP
+  Status Flush(bool lock) {return Status::OK();};
+  Status MoveTo(uint64_t offset) {return Status::OK();};
+  Status MoveToEnd(uint64_t &file_size) {return Status::OK();};
+#endif
 };
 
 bool HandleDumpCommand(Env* env, char** files, int num) {

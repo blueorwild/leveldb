@@ -12,6 +12,9 @@
 #include <string>
 #include <vector>
 
+#include <sys/types.h>
+#include <unistd.h>
+
 #include "db/builder.h"
 #include "db/db_iter.h"
 #include "db/dbformat.h"
@@ -82,7 +85,9 @@ struct DBImpl::CompactionState {
   std::vector<Output> outputs;
 #ifdef MZP
   std::vector<FileMetaData*> alters;
-  FileMetaData* current_alter;
+  // 这里多弄两个东西是因为新增和追加存在交替进行，需要判断
+  FileMetaData* current_alter = nullptr;
+  uint64_t current_new = -1;
 #endif
 
   // State kept for output being generated
@@ -334,7 +339,6 @@ Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
                                      "exists (error_if_exists is true)");
     }
   }
-
   s = versions_->Recover(save_manifest);
   if (!s.ok()) {
     return s;
@@ -548,6 +552,8 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
     const Slice max_user_key = meta.largest.user_key();
     if (base != nullptr) {
       level = base->PickLevelForMemTableOutput(min_user_key, max_user_key);
+      std::cout << "new sst, level: " << level << ",size: " 
+                << meta.file_size / 1000 << "kb" << std::endl;
     }
 #ifdef MZP
     edit->AddFile(level, meta.number, meta.file_size, meta.sst_count,
@@ -585,6 +591,7 @@ void DBImpl::CompactMemTable() {
     edit.SetPrevLogNumber(0);
     edit.SetLogNumber(logfile_number_);  // Earlier logs no longer needed
     s = versions_->LogAndApply(&edit, &mutex_);
+    Version* base = versions_->current();
   }
 
   if (s.ok()) {
@@ -728,7 +735,10 @@ void DBImpl::BackgroundCompaction() {
   }
 
    // 不考虑manual!!!
+  std::cout << "PickCompaction start" << std::endl;
   Compaction* c = versions_->PickCompaction();
+  std::cout << "PickCompaction end" << std::endl;
+
 
   Status status;
   if (c == nullptr) {
@@ -863,7 +873,6 @@ void DBImpl::CleanupCompaction(CompactionState* compact) {
     delete compact->builder;
   } else {
     assert(compact->outfile == nullptr);
-    assert(compact->current_alter == nullptr);
   }
   delete compact->outfile;
   for (auto &out : compact->outputs) {
@@ -872,6 +881,8 @@ void DBImpl::CleanupCompaction(CompactionState* compact) {
   for (auto &f : compact->alters) {
     pending_alters_.erase(f);
   }
+  compact->current_alter = nullptr;
+  compact->current_new = -1;
   delete compact;
 }
 #else
@@ -905,9 +916,10 @@ Status DBImpl::OpenAppendOutputFile(CompactionState* compact, FileMetaData* f) {
   }
 
   // Make the output file
-  std::string fname = TableFileName(dbname_, f->file_number);
+  std::string fname = TableFileName(dbname_, f->number);
   Status s = env_->NewRandomWritableFile(fname, &compact->outfile);
   if (s.ok()) {
+    std::cout << "Open 追加文件" << std::endl;
     compact->builder = new TableBuilder(options_, compact->outfile);
     compact->builder->MoveToEnd();
     compact->current_alter = f;
@@ -953,8 +965,9 @@ Status DBImpl::FinishAppendOutputFile(CompactionState* compact,
   if (s.ok() && current_entries > 0) {
     // Verify that the table is usable
     Cache::Handle* handle = nullptr;
-    s = table_cache->FindTable(f->number, current_bytes, &handle);
-    table_cache->ReleaseHandle(handle);  // just verify
+    // 这里应该更新缓存，如果老方式直接Find会找到已有的缓存
+    s = table_cache_->FindTable(f->number, current_bytes, &handle, true);
+    table_cache_->ReleaseHandle(handle);  // just verify
 
     if (s.ok()) {
       Log(options_.info_log, "Generated table #%llu@%d: %lld keys, %lld bytes",
@@ -965,9 +978,11 @@ Status DBImpl::FinishAppendOutputFile(CompactionState* compact,
   }
   return s;
 }
+#endif
 
-Status InstallCompactionResults(CompactionState* compact,
-    std::vector<FileMetaData*> inputs1_clean_files) {
+#ifdef MZP
+Status DBImpl::InstallCompactionResults(CompactionState* compact,
+    std::set<FileMetaData*> &inputs1_clean_files) {
   mutex_.AssertHeld();
   const int level = compact->compaction->level();
   Log(options_.info_log, "Compacted %d@%d + %d@%d files => %lld bytes",
@@ -978,14 +993,42 @@ Status InstallCompactionResults(CompactionState* compact,
   // 文件变更应用到版本edit，包括删除的，新增的，更改的
   compact->compaction->AddInputDeletions(compact->compaction->edit(), inputs1_clean_files);
   for (auto &out : compact->outputs) {
+    std::cout << "outputs" << std::endl;
+    auto k = out.smallest.Encode();
+    std::cout << out.sst_count << "  " << std::string(k.data(), k.size()-8);
+    k = out.largest.Encode();
+    std::cout << "  " << std::string(k.data(), k.size()-8) << std::endl;
     compact->compaction->edit()->AddFile(level + 1, out.number, out.file_size,
-                                         out.smallest, out.largest);
+                                         out.sst_count, out.smallest, out.largest);
   }
   for (auto &f : compact->alters) {
+    std::cout << "alters" << std::endl;
+    auto k = f->smallest.Encode();
+    std::cout << f->sst_count << "  " << std::string(k.data(), k.size()-8);
+    k = f->largest.Encode();
+    std::cout << "  " << std::string(k.data(), k.size()-8) << std::endl;
     compact->compaction->edit()->AlterFile(level + 1, f);
   }
 
   return versions_->LogAndApply(compact->compaction->edit(), &mutex_);    
+}
+#else
+Status DBImpl::InstallCompactionResults(CompactionState* compact) {
+  mutex_.AssertHeld();
+  Log(options_.info_log, "Compacted %d@%d + %d@%d files => %lld bytes",
+      compact->compaction->num_input_files(0), compact->compaction->level(),
+      compact->compaction->num_input_files(1), compact->compaction->level() + 1,
+      static_cast<long long>(compact->total_bytes));
+
+  // Add compaction outputs
+  compact->compaction->AddInputDeletions(compact->compaction->edit());
+  const int level = compact->compaction->level();
+  for (size_t i = 0; i < compact->outputs.size(); i++) {
+    const CompactionState::Output& out = compact->outputs[i];
+    compact->compaction->edit()->AddFile(level + 1, out.number, out.file_size,
+                                         out.smallest, out.largest);
+  }
+  return versions_->LogAndApply(compact->compaction->edit(), &mutex_);
 }
 #endif
 
@@ -1002,7 +1045,7 @@ Status DBImpl::OpenCompactionOutputFile(CompactionState* compact) {
     out.smallest.Clear();
     out.largest.Clear();
 #ifdef MZP
-    out.sst_count = 0;
+    out.sst_count = 1;  // init 1, not safe
 #endif
     compact->outputs.push_back(out);
     mutex_.Unlock();
@@ -1013,6 +1056,9 @@ Status DBImpl::OpenCompactionOutputFile(CompactionState* compact) {
   Status s = env_->NewWritableFile(fname, &compact->outfile);
   if (s.ok()) {
     compact->builder = new TableBuilder(options_, compact->outfile);
+#ifdef MZP
+    compact->current_new = file_number;
+#endif
   }
   return s;
 }
@@ -1049,13 +1095,23 @@ Status DBImpl::FinishCompactionOutputFile(CompactionState* compact,
   }
   delete compact->outfile;
   compact->outfile = nullptr;
+#ifdef MZP
+  compact->current_new = -1;
+#endif
+
+  auto file = compact->current_output();
+  std::cout << "new file" << file->number << std::endl;
+  auto k = file->smallest.Encode();
+  std::cout << std::string(k.data(), k.size() - 8) << std::endl;
+  k = file->largest.Encode();
+  std::cout << std::string(k.data(), k.size() - 8) << std::endl;
 
   if (s.ok() && current_entries > 0) {
     // Verify that the table is usable
 #ifdef MZP
     Cache::Handle* handle = nullptr;
-    s = table_cache->FindTable(output_number, current_bytes, &handle);
-    table_cache->ReleaseHandle(handle);  // just verify
+    s = table_cache_->FindTable(output_number, current_bytes, &handle);
+    table_cache_->ReleaseHandle(handle);  // just verify
 #else
     Iterator* iter =
         table_cache_->NewIterator(ReadOptions(), output_number, current_bytes);
@@ -1072,31 +1128,14 @@ Status DBImpl::FinishCompactionOutputFile(CompactionState* compact,
   return s;
 }
 
-Status DBImpl::InstallCompactionResults(CompactionState* compact) {
-  mutex_.AssertHeld();
-  Log(options_.info_log, "Compacted %d@%d + %d@%d files => %lld bytes",
-      compact->compaction->num_input_files(0), compact->compaction->level(),
-      compact->compaction->num_input_files(1), compact->compaction->level() + 1,
-      static_cast<long long>(compact->total_bytes));
-
-  // Add compaction outputs
-  compact->compaction->AddInputDeletions(compact->compaction->edit());
-  const int level = compact->compaction->level();
-  for (size_t i = 0; i < compact->outputs.size(); i++) {
-    const CompactionState::Output& out = compact->outputs[i];
-    compact->compaction->edit()->AddFile(level + 1, out.number, out.file_size,
-                                         out.smallest, out.largest);
-  }
-  return versions_->LogAndApply(compact->compaction->edit(), &mutex_);
-}
-
 #ifdef MZP
 // 原来就是直接一个迭代器，一个大循环，输出到新文件就行了
 // 现在要复杂的多，慢慢来。
 // 首先还是先类似迭代器排序（我还是对迭代器不感冒啊）,然后依次往下层文件塞，
 // 这里需要先对下层文件排个序？塞采用左超右不超的原则（最后一个右超的new）。
 // 如果塞时发现文件大小超过阈值或sst_count达到阈值，那就new。
-Status DBImpl::(CompactionState* compact) {
+Status DBImpl::DoCompactionWork(CompactionState* compact) {
+  std::cout << "DoCompactionWork 1" << std::endl;
   const uint64_t start_micros = env_->NowMicros();
   int64_t imm_micros = 0;  // Micros spent doing imm_ compactions
 
@@ -1129,6 +1168,7 @@ Status DBImpl::(CompactionState* compact) {
   SequenceNumber last_sequence_for_key = kMaxSequenceNumber;
   int current_input1_index = 0;
   int input1_file_num = compact->compaction->num_input_files(1);
+  std::cout << "DoCompactionWork 2: " << input1_file_num << std::endl;
   while (input->Valid() && !shutting_down_.load(std::memory_order_acquire)) {
     // 如果有内存刷盘，先执行内存刷盘
     if (has_imm_.load(std::memory_order_relaxed)) {
@@ -1149,6 +1189,7 @@ Status DBImpl::(CompactionState* compact) {
     // 1) 首先解析key，获得user_key、type(删除新增)、序列号, 解析失败当鸵鸟
     // 2) 对于删除的key，需要保证更高层没有相同user_key, 且小于最老快照号，才能清理
     // 3) 对于新增的key，需要保证自己是第二个以上的小于等于最老快照号的相同user_key,才能清理
+    Slice key = input->key();
     bool drop = false;
     if (!ParseInternalKey(key, &ikey)) {  // 1)
       current_user_key.clear();
@@ -1161,7 +1202,6 @@ Status DBImpl::(CompactionState* compact) {
         current_user_key.assign(ikey.user_key.data(), ikey.user_key.size());
         has_current_user_key = true;
         last_sequence_for_key = kMaxSequenceNumber;
-
         if (ikey.type == kTypeDeletion && ikey.sequence <= compact->smallest_snapshot
             && compact->compaction->IsBaseLevelForKey(ikey.user_key)) {  // 2)
           drop = true;
@@ -1186,13 +1226,14 @@ Status DBImpl::(CompactionState* compact) {
     // 1) 下层有对应key范围的文件且没达到sst_count(这个属于输入部分了)，那么直接追加。
     // 2) 否则写新文件(或者之前建立的新文件)
     if (!drop) {
+      // std::cout << std::string(key.data(), key.size()-8) << std::endl;
       Loop1:
       if (input1_file_num != 0 && current_input1_index < input1_file_num) {
         FileMetaData* f = compact->compaction->input(1, current_input1_index);
         if (internal_comparator_.Compare(key, f->largest.Encode()) < 0) {
           if (inputs1_clean_files.count(f) == 0) {
             // 到这里是追加文件，如果之前有正在新建add的文件，先结束掉
-            if (compact->outfile != nullptr) {
+            if (compact->current_new != -1) {
               status = FinishCompactionOutputFile(compact, input);
               if (!status.ok()) {
                 break;
@@ -1221,10 +1262,21 @@ Status DBImpl::(CompactionState* compact) {
               compact->current_alter->smallest.DecodeFrom(key);
             }
             compact->builder->Add(key, input->value());
+            // 追加完成后，跳到末尾
+            goto Loop2;
           }
           // else 下层有对应key范围的文件，但属于输入部分，则new
         } else {
           // 下层当前文件不对应key范围(key超过了下层文件的最大值)
+          std::cout << "cur_index:" << current_input1_index << std::endl;
+          std::cout << std::string(key.data(), key.size()-8) << std::endl;
+
+          auto k = f->smallest.Encode();
+          std::cout << std::string(k.data(), k.size()-8) << std::endl;
+
+          k = f->largest.Encode();
+          std::cout << std::string(k.data(), k.size()-8) << std::endl;
+
           ++current_input1_index;
           goto Loop1;
         }
@@ -1259,7 +1311,7 @@ Status DBImpl::(CompactionState* compact) {
         }
       }
     }
-
+    Loop2:
     // 到这里当前key写入完成，继续next
     input->Next();
   }
@@ -1269,8 +1321,7 @@ Status DBImpl::(CompactionState* compact) {
   }
   if (status.ok() && compact->current_alter != nullptr) {
     status = FinishAppendOutputFile(compact, input);
-  }
-  if (status.ok() && compact->builder != nullptr) {
+  } else if (status.ok() && compact->current_new != -1) {
     status = FinishCompactionOutputFile(compact, input);
   }
   if (status.ok()) {
@@ -1301,7 +1352,7 @@ Status DBImpl::(CompactionState* compact) {
   stats_[compact->compaction->level() + 1].Add(stats);
 
   if (status.ok()) {
-    status = InstallCompactionResults(compact);
+    status = InstallCompactionResults(compact, inputs1_clean_files);
   }
   if (!status.ok()) {
     RecordBackgroundError(status);
@@ -1905,13 +1956,13 @@ DB::~DB() = default;
 
 Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
   *dbptr = nullptr;
-
   DBImpl* impl = new DBImpl(options, dbname);
   impl->mutex_.Lock();
   VersionEdit edit;
   // Recover handles create_if_missing, error_if_exists
   bool save_manifest = false;
   Status s = impl->Recover(&edit, &save_manifest);
+  
   if (s.ok() && impl->mem_ == nullptr) {
     // Create new log and a corresponding memtable.
     uint64_t new_log_number = impl->versions_->NewFileNumber();

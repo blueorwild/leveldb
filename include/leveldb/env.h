@@ -273,6 +273,10 @@ class LEVELDB_EXPORT RandomAccessFile {
   // Safe for concurrent use by multiple threads.
   virtual Status Read(uint64_t offset, size_t n, Slice* result,
                       char* scratch) const = 0;
+#ifdef MZP
+  virtual Status Read(uint64_t offset, size_t n, Slice* result,
+              char* scratch, bool lock) const = 0;
+#endif
 };
 
 // A file abstraction for sequential writing.  The implementation
@@ -292,7 +296,9 @@ class LEVELDB_EXPORT WritableFile {
   virtual Status Flush() = 0;
   virtual Status Sync() = 0;
 #ifdef MZP
+  virtual Status Flush(bool lock) = 0;
   virtual Status MoveTo(uint64_t offset) = 0;
+  virtual Status MoveToEnd(uint64_t &file_size) = 0;
 #endif
 };
 

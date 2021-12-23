@@ -15,6 +15,11 @@ namespace leveldb {
 class Block;
 class BlockHandle;
 class Footer;
+#ifdef MZP
+class IndexBlock;
+class Header;
+class FilterBlockReader;
+#endif
 struct Options;
 class RandomAccessFile;
 struct ReadOptions;
@@ -77,9 +82,10 @@ class LEVELDB_EXPORT Table {
                      void (*handle_result)(void* arg, const Slice& k,
                                            const Slice& v));
 #ifdef MZP
-  static Iterator* Table::BlockReader(void*, const ReadOptions&, uint64_t, size_t);
-  void ReadFilter(IndexBlock* index_block, uint64_t index_block_offset,
-                  FilterBlockReader* &filter);
+  static Iterator* BlockReader(void*, const ReadOptions&, uint64_t, size_t);
+  static void ReadFilter(const Options& options, RandomAccessFile* file,
+                         IndexBlock* index_block, uint64_t index_block_offset,
+                         FilterBlockReader** filter);
 #else
   void ReadMeta(const Footer& footer);
   void ReadFilter(const Slice& filter_handle_value);

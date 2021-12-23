@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "leveldb/slice.h"
 #include "leveldb/status.h"
@@ -78,10 +79,11 @@ class Header {
   };
 
   size_t get_count() const { return count_; }
-  const std::vector<uint64_t>& get_offset() const { return offset_; }
+  uint64_t get_offset(size_t i) const { return offset_[i]; }
   
-  void Append(uint64_t offset);
-  void EncodeTo(std::string* dst) const;
+  // 每次只会往Header中添加一个，不需要append 和 Encode
+  // void Append(uint64_t offset);
+  // void EncodeTo(std::string* dst) const;
   Status DecodeFrom(Slice* input);
 
  private:
@@ -101,13 +103,13 @@ class Footer {
   uint64_t GetIndexBlockOffset() const { return index_block_offset_; };
 
   void SetIndexBlockSize(size_t size) { index_block_size_ = size; };
-  size_t GetIndexBlockSize() const { return index_block_size_; };
+  uint32_t GetIndexBlockSize() const { return index_block_size_; };
 
   void SetIndexCount(size_t count) { index_count_ = count; };
-  size_t GetIndexCount() const { return index_count_; };
+  uint32_t GetIndexCount() const { return index_count_; };
 
   void SetKvNum(size_t num) { kv_num_ = num; };
-  size_t GetKvNum() const { return kv_num_; };
+  uint32_t GetKvNum() const { return kv_num_; };
 
   void SetFilterName(std::string& key) { filter_name_ = key; };
   std::string GetFilterName() const { return filter_name_; };
@@ -117,9 +119,9 @@ class Footer {
 
  private:
   uint64_t index_block_offset_;
-  size_t index_block_size_;
-  size_t index_count_;
-  size_t kv_num_;
+  uint32_t index_block_size_;
+  uint32_t index_count_;
+  uint32_t kv_num_;
   std::string filter_name_;
 };
 

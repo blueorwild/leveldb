@@ -56,7 +56,7 @@ TableBuilder::TableBuilder(const Options& options, WritableFile* file)
     rep_->closed = true;
   }
 }
-void MoveToEnd() {
+void TableBuilder::MoveToEnd() {
   rep_->status = rep_->file->MoveToEnd(rep_->offset);   
   if (!rep_->status.ok()) {
     rep_->closed = true;
@@ -79,8 +79,6 @@ Status TableBuilder::ChangeOptions(const Options& options) {
   // Note that any live BlockBuilders point to rep_->options and therefore
   // will automatically pick up the updated options.
   rep_->options = options;
-  rep_->index_block_options = options;
-  rep_->index_block_options.block_restart_interval = 1;
   return Status::OK();
 }
 
@@ -130,7 +128,7 @@ void TableBuilder::WriteBlock() {
   //    crc: uint32
   assert(ok());
   Rep* r = rep_;
-  Slice raw = r->data_block->Finish();
+  Slice raw = r->data_block.Finish();
 
   Slice block_contents;
   CompressionType type = r->options.compression;
@@ -175,14 +173,14 @@ void TableBuilder::WriteBlock() {
 
     Slice filter_contents;
     if (r->filter_block != nullptr) {
-      filter_contents = r->filter_block->Finish(r->offset);
+      filter_contents = r->filter_block->Finish();
       r->status = r->file->Append(filter_contents);  // add filter
     }
     if (r->status.ok()) {
       // r->index_block.SetBlockSize(block_contents.size() + filter_contents.size() + kBlockTrailerSize);
       // add type and crc
       char trailer[kBlockTrailerSize];
-      trailer[0] = type;
+      trailer[0] = kNoCompression;   // 过滤器也不压缩了，其实本来也没用snappy
       uint32_t crc = crc32c::Extend(crc, filter_contents.data(), filter_contents.size());  // filter CRC
       crc = crc32c::Extend(crc, trailer, 1);  // type crc
       EncodeFixed32(trailer + 1, crc32c::Mask(crc));
@@ -194,8 +192,11 @@ void TableBuilder::WriteBlock() {
   }
 
   r->compressed_output.clear();
-  r->data_block->Reset();
-  r->filter_block->Reset();
+  r->data_block.Reset();
+  if (r->filter_block != nullptr) {
+    r->filter_block->Reset();
+  }
+  
 }
 
 Status TableBuilder::status() const { return rep_->status; }
@@ -203,33 +204,38 @@ Status TableBuilder::status() const { return rep_->status; }
 Status TableBuilder::Finish() {
   Rep* r = rep_;
   Flush();
+
   assert(!r->closed);
   r->closed = true;
 
   Footer footer;
-  Header header;
+  std::string footer_count, footer_offset;
 
   // Write index block
   if (ok()) {
     Slice index_contents = r->index_block.Finish();
-    r->status = r->file->Append(index_contents);  // add filter
+    r->status = r->file->Append(index_contents);  // add index
     if (r->status.ok()) {
       footer.SetIndexBlockOffset(r->offset);
-      footer.SetIndexBlockSize(r->index_contents.size());
+      footer.SetIndexBlockSize(r->index_block.size());
       footer.SetIndexCount(r->index_block.GetIndexCount());
       footer.SetKvNum(r->num_entries);
-      footer.SetFilterName(std::string("filter.") + std::string(r->options.filter_policy->Name()));
-
+      if (r->filter_block != nullptr) {
+        std::string filter_name("filter.");
+        filter_name += std::string(r->options.filter_policy->Name());
+        footer.SetFilterName(filter_name);
+      }
+    
       // add type and crc
       char trailer[kBlockTrailerSize];
-      trailer[0] = type;
+      trailer[0] = kNoCompression;   
       uint32_t crc = crc32c::Value(index_contents.data(), index_contents.size());  // data CRC
       crc = crc32c::Extend(crc, trailer, 1);  // type crc
       EncodeFixed32(trailer + 1, crc32c::Mask(crc));
       r->status = r->file->Append(Slice(trailer, kBlockTrailerSize));
       if (r->status.ok()) {
         r->offset += index_contents.size() + kBlockTrailerSize;
-        header.Append(r->offset);
+        PutFixed64(&footer_offset, r->offset);
       }
     }
   }
@@ -247,14 +253,16 @@ Status TableBuilder::Finish() {
 
   // Write Header
   if (ok()) {
-    std::string header_encoding;
-    header.EncodeTo(&header_encoding);
+    PutFixed32(&footer_count, 1);
     r->status = r->file->MoveTo(0);
-    if (r->status.ok()) {
-      r->status = r->file->Append(header_encoding);
-      r->status = r->file->Flush(true);  // 加锁
-    }
+    if (!ok()) return r->status;
+    r->status = r->file->Append(Slice(footer_count));
+    if (!ok()) return r->status;
+    r->status = r->file->Append(Slice(footer_offset));
+    if (!ok()) return r->status;
+    r->status = r->file->Flush();
   }
+
   return r->status;
 }
 
@@ -265,7 +273,7 @@ Status TableBuilder::AppendFinish(size_t sst_count) {
   r->closed = true;
 
   Footer footer;
-  char new_sst_count[4], new_offset[8];  // 新的header的4字节count(覆盖)，8字节offset(追加)
+  std::string new_sst_count, new_offset; // 新的header的4字节count(覆盖)，8字节offset(追加)
 
   // Write index block
   if (ok()) {
@@ -273,21 +281,23 @@ Status TableBuilder::AppendFinish(size_t sst_count) {
     r->status = r->file->Append(index_contents);  // add filter
     if (r->status.ok()) {
       footer.SetIndexBlockOffset(r->offset);
-      footer.SetIndexBlockSize(r->index_contents.size());
+      footer.SetIndexBlockSize(r->index_block.size());
       footer.SetIndexCount(r->index_block.GetIndexCount());
       footer.SetKvNum(r->num_entries);
-      footer.SetFilterName(std::string("filter.") + std::string(r->options.filter_policy->Name()));
+      std::string filter_name("filter.");
+      filter_name += std::string(r->options.filter_policy->Name());
+      footer.SetFilterName(filter_name);
 
       // add type and crc
       char trailer[kBlockTrailerSize];
-      trailer[0] = type;
+      trailer[0] = kNoCompression;   // 新的方式indexblock不压缩了，其实本来也没用snappy
       uint32_t crc = crc32c::Value(index_contents.data(), index_contents.size());  // data CRC
       crc = crc32c::Extend(crc, trailer, 1);  // type crc
       EncodeFixed32(trailer + 1, crc32c::Mask(crc));
       r->status = r->file->Append(Slice(trailer, kBlockTrailerSize));
       if (r->status.ok()) {
         r->offset += index_contents.size() + kBlockTrailerSize;
-        PutFixed64(new_offset, r->offset);
+        PutFixed64(&new_offset, r->offset);
       }
     }
   }
@@ -305,18 +315,25 @@ Status TableBuilder::AppendFinish(size_t sst_count) {
 
   // Write Header
   if (ok()) {
-    PutFixed32(new_sst_count, sst_count + 1);
+    PutFixed32(&new_sst_count, sst_count + 1);
     r->status = r->file->MoveTo(0);
-    if (r->status.ok()) {
-      r->status = r->file->Append(Slice(new_sst_count, 4));
-      r->status = r->file->Flush();
+    if (ok()) {
+      r->status = r->file->Append(Slice(new_sst_count));
+      if (ok()) {
+        r->status = r->file->Flush();
+      }
     }
-    if (r->status.ok()) {
-      // 懒得考虑status了
+    
+    if (ok()) {
       r->status = r->file->MoveTo(4 + sst_count * 8);
-      r->status = r->file->Append(Slice(new_offset, 8));
-      r->status = r->file->Flush();
+      if (ok()) {
+        r->status = r->file->Append(Slice(new_offset));
+        if (ok()) {
+          r->status = r->file->Flush();
+        }
+      }
     }
+    
   }
   return r->status;
 }

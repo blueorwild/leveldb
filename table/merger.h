@@ -5,6 +5,8 @@
 #ifndef STORAGE_LEVELDB_TABLE_MERGER_H_
 #define STORAGE_LEVELDB_TABLE_MERGER_H_
 
+#include <vector>
+
 namespace leveldb {
 
 class Comparator;

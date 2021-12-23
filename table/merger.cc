@@ -1,6 +1,7 @@
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
+#include <iostream>
 
 #include "table/merger.h"
 
@@ -20,7 +21,6 @@ class MergingIterator : public Iterator {
   Iterator* current_;
 
   const Comparator* comparator_;
-  Status status_;
 
  public:
   MergingIterator(const Comparator* comparator, Iterator** children, int n)
@@ -29,6 +29,7 @@ class MergingIterator : public Iterator {
     for (int i = 0; i < n; ++i) {
       children_[i] = children[i];
     }
+    std::cout << "MergingIterator" << std::endl;
   }
 
   ~MergingIterator() override {}
@@ -59,8 +60,9 @@ class MergingIterator : public Iterator {
   }
 
   Status status() const override {
+    Status status;
     for (auto &Iter : children_) {
-      status_ = Iter->status();
+      status = (*Iter).status();
       if (!status.ok()) {
         break;
       }
@@ -75,11 +77,11 @@ class MergingIterator : public Iterator {
 
  private:
   void FindSmallest() {
-    IteratorWrapper* smallest = nullptr;
+    Iterator* smallest = nullptr;
     for (auto &Iter : children_) {
       if (Iter->Valid()) {
         if (smallest == nullptr || comparator_->Compare(Iter->key(), smallest->key()) < 0) {
-          smallest = child;
+          smallest = Iter;
         }
       }
     }

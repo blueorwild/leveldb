@@ -115,6 +115,12 @@ class TestWritableFile : public WritableFile {
   Status Flush() override;
   Status Sync() override;
 
+#ifdef MZP
+  Status Flush(bool lock) {return Status::OK();};
+  Status MoveTo(uint64_t offset) {return Status::OK();};
+  Status MoveToEnd(uint64_t &file_size) {return Status::OK();};
+#endif
+
  private:
   FileState state_;
   WritableFile* target_;

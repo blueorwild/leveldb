@@ -23,6 +23,7 @@
 #include "db/version_edit.h"
 #include "port/port.h"
 #include "port/thread_annotations.h"
+#include "table/format.h"
 
 namespace leveldb {
 
@@ -38,6 +39,9 @@ class TableCache;
 class Version;
 class VersionSet;
 class WritableFile;
+#ifdef MZP
+class Header;
+#endif
 
 // Return the smallest index i such that files[i]->largest >= key.
 // Return files.size() if there is no such file.
@@ -90,19 +94,24 @@ class Version {
   // under live iterators)
   void Ref();
   void Unref();
-
-  void GetOverlappingInputs(
-      int level,
-      const InternalKey* begin,  // nullptr means before all keys
-      const InternalKey* end,    // nullptr means after all keys
-      std::vector<FileMetaData*>* inputs);
-
 #ifdef MZP
   // 找出在范围内的文件，上面那个是范围交叠，并且会更新边界
   void GetIncludeInputs(
       int level,
       const InternalKey &begin,  // nullptr means before all keys
       const InternalKey &end,    // nullptr means after all keys
+      std::vector<FileMetaData*>* inputs);
+  void GetOverlappingInputs(
+      int level,
+      InternalKey* begin,  // nullptr means before all keys
+      InternalKey* end,    // nullptr means after all keys
+      std::vector<FileMetaData*>* inputs);
+  void Print();
+#else
+  void GetOverlappingInputs(
+      int level,
+      const InternalKey* begin,  // nullptr means before all keys
+      const InternalKey* end,    // nullptr means after all keys
       std::vector<FileMetaData*>* inputs);
 #endif
 
@@ -257,6 +266,7 @@ class VersionSet {
   // The caller should delete the iterator when no longer needed.
 #ifdef MZP
   Iterator* MakeInputIterator(Compaction* c, std::set<FileMetaData*> &inputs1_clean_files);
+  void Print() { current_->Print(); } ;
 #else
   Iterator* MakeInputIterator(Compaction* c);
 #endif

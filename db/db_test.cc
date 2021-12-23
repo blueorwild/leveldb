@@ -160,6 +160,11 @@ class SpecialEnv : public EnvWrapper {
         }
         return base_->Sync();
       }
+#ifdef MZP
+      Status Flush(bool lock) {return Status::OK();};
+      Status MoveTo(uint64_t offset) {return Status::OK();};
+      Status MoveToEnd(uint64_t &file_size) {return Status::OK();};
+#endif
     };
     class ManifestFile : public WritableFile {
      private:
@@ -185,6 +190,11 @@ class SpecialEnv : public EnvWrapper {
           return base_->Sync();
         }
       }
+#ifdef MZP
+      Status Flush(bool lock) {return Status::OK();};
+      Status MoveTo(uint64_t offset) {return Status::OK();};
+      Status MoveToEnd(uint64_t &file_size) {return Status::OK();};
+#endif
     };
 
     if (non_writable_.load(std::memory_order_acquire)) {
@@ -218,6 +228,10 @@ class SpecialEnv : public EnvWrapper {
         counter_->Increment();
         return target_->Read(offset, n, result, scratch);
       }
+#ifdef MZP
+      Status Read(uint64_t offset, size_t n, Slice* result,
+                  char* scratch, bool lock) const { return Status::OK(); };
+#endif
     };
 
     Status s = target()->NewRandomAccessFile(f, r);
@@ -2332,7 +2346,12 @@ static void BM_LogAndApply(benchmark::State& state) {
   for (int i = 0; i < num_base_files; i++) {
     InternalKey start(MakeKey(2 * fnum), 1, kTypeValue);
     InternalKey limit(MakeKey(2 * fnum + 1), 1, kTypeDeletion);
+#ifdef MZP
+    vbase.AddFile(2, fnum++, 1 /* file size */, 1, start, limit);
+#else
     vbase.AddFile(2, fnum++, 1 /* file size */, start, limit);
+#endif
+
   }
   ASSERT_LEVELDB_OK(vset.LogAndApply(&vbase, &mu));
 
@@ -2343,7 +2362,11 @@ static void BM_LogAndApply(benchmark::State& state) {
     vedit.RemoveFile(2, fnum);
     InternalKey start(MakeKey(2 * fnum), 1, kTypeValue);
     InternalKey limit(MakeKey(2 * fnum + 1), 1, kTypeDeletion);
+#ifdef MZP
+    vedit.AddFile(2, fnum++, 1 /* file size */, 1, start, limit);
+#else
     vedit.AddFile(2, fnum++, 1 /* file size */, start, limit);
+#endif
     vset.LogAndApply(&vedit, &mu);
   }
   uint64_t stop_micros = env->NowMicros();

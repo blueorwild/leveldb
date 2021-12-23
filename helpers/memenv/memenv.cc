@@ -192,6 +192,12 @@ class RandomAccessFileImpl : public RandomAccessFile {
               char* scratch) const override {
     return file_->Read(offset, n, result, scratch);
   }
+#ifdef MZP
+  Status Read(uint64_t offset, size_t n, Slice* result,
+              char* scratch, bool lock) const override {
+    return Status::OK();
+  }
+#endif
 
  private:
   FileState* file_;
@@ -208,6 +214,12 @@ class WritableFileImpl : public WritableFile {
   Status Close() override { return Status::OK(); }
   Status Flush() override { return Status::OK(); }
   Status Sync() override { return Status::OK(); }
+
+#ifdef MZP
+  Status Flush(bool lock) {return Status::OK();};
+  Status MoveTo(uint64_t offset) {return Status::OK();};
+  Status MoveToEnd(uint64_t &file_size) {return Status::OK();};
+#endif
 
  private:
   FileState* file_;

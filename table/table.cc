@@ -19,15 +19,17 @@ namespace leveldb {
 #ifdef MZP
 struct Table::Rep {
   ~Rep() {
-    for (auto &i : index_blocks) {
+    for (auto &i : *index_blocks) {
       delete i;
     }
-    for (auto &i : filters) {
-      delete i;
+    if (options.filter_policy != nullptr) {
+      for (auto &i : *filters) {
+        delete i;
+      }
+      delete filters;
     }
     delete index_blocks;
     delete kv_nums;
-    delete filters;
   }
 
   Options options;
@@ -53,27 +55,32 @@ Status Table::Open(const Options& options, RandomAccessFile* file,
   // 读 header
   char header_space[header_size];
   Slice header_input;
+  std::cout << "Open 1" << std::endl;
   Status s = file->Read(0, header_size, &header_input, header_space, true);  // 安全读
   if (!s.ok()) return s;
   Header header;
+  std::cout << "Open 2" << std::endl;
   s = header.DecodeFrom(&header_input);
   if (!s.ok()) return s;
 
   // 读 footer
   size_t footer_count = header.get_count();
-  const std::vector<uint64_t>& footer_offset = header.get_offset();
+  uint64_t footer_offset;
 
   char footer_space[Footer::kFooterSize];
   Slice footer_input;
   Footer footer;
   std::vector<IndexBlock*> tmp_index_blocks(footer_count);
   std::vector<size_t> tmp_kv_nums(footer_count);
-  std::vector<FilterBlockReader* >* tmp_filters(footer_count);
+  std::vector<FilterBlockReader* > tmp_filters(footer_count);
 
   for (int i = 0; i < footer_count; ++i){
-    Status s = file->Read(footer_offset[i], Footer::kFooterSize, &footer_input, footer_space);
+    footer_offset = header.get_offset(i);
+    std::cout << "Open 3" << footer_offset << std::endl;
+    Status s = file->Read(footer_offset, Footer::kFooterSize, &footer_input, footer_space);
     if (!s.ok()) return s;
 
+    std::cout << "Open 4" << std::endl;
     s = footer.DecodeFrom(&footer_input);
     if (!s.ok()) return s;
 
@@ -85,11 +92,15 @@ Status Table::Open(const Options& options, RandomAccessFile* file,
     if (options.paranoid_checks) {
       opt.verify_checksums = true;
     }
+    std::cout << "Open 5: " << footer.GetIndexBlockOffset() << " "
+              << footer.GetIndexBlockSize() << " " 
+              << footer.GetIndexCount() << std::endl;
     s = ReadBlock(file, opt, footer.GetIndexBlockOffset(),
                   footer.GetIndexBlockSize(), &index_block_input);
     IndexBlock* index_block = new IndexBlock(index_block_input, footer.GetIndexCount());
     if (!index_block->vaild()) {
-      s = Status::kCorrupt("bad indexBlock");
+      std::cout << "bad indexBlock" << std::endl;
+      s = Status::Corruption("bad indexBlock");
       delete index_block;
     }
     if (!s.ok()) {
@@ -101,7 +112,7 @@ Status Table::Open(const Options& options, RandomAccessFile* file,
     }
     // 现在安全了, 然后读过滤器
     tmp_index_blocks[i] = index_block;
-    ReadFilter(index_block, footer.GetIndexBlockOffset(), &tmp_filters[i]);
+    ReadFilter(options, file, index_block, footer.GetIndexBlockOffset(), &tmp_filters[i]);
   }
 
   if (s.ok()) {
@@ -113,16 +124,21 @@ Status Table::Open(const Options& options, RandomAccessFile* file,
     rep->cache_id = (options.block_cache ? options.block_cache->NewId() : 0);
     rep->index_blocks = new std::vector<IndexBlock*>(tmp_index_blocks);
     rep->kv_nums = new std::vector<size_t>(tmp_kv_nums);
-    rep->filters = new std::vector<FilterBlockReader*>(tmp_filters);
+    if (options.filter_policy != nullptr) {
+      rep->filters = new std::vector<FilterBlockReader*>(tmp_filters);
+    } else {
+      rep->filters = nullptr;
+    }
     *table = new Table(rep);
   }
   return s;
 }
 
-void Table::ReadFilter(IndexBlock* index_block, uint64_t index_block_offset,
+void Table::ReadFilter(const Options& options, RandomAccessFile* file,
+                       IndexBlock* index_block, uint64_t index_block_offset,
                        FilterBlockReader** filter) {
   // 遍历索引块数组，根据每个索引块计算多个filter的offset和size。
-  if (rep_->options.filter_policy == nullptr) {
+  if (options.filter_policy == nullptr) {
     return;
   }
   ReadOptions opt;
@@ -134,20 +150,20 @@ void Table::ReadFilter(IndexBlock* index_block, uint64_t index_block_offset,
   int i = 0;
   // filter 没有单独保存offset和size，需要计算
   uint64_t last_offset, cur_offset, tmp_offset;
-  size_t last_size, cur_size_ tmp_size;
+  size_t last_size, cur_size, tmp_size;
   BlockContents block;
   index_block->SeekToFirst();
   index_block->Current(last_offset, last_size);
   index_block->Next();
 
-  while (index_block->IterVaild) {
+  while (index_block->IterVaild()) {
     index_block->Current(cur_offset, cur_size);
     tmp_offset = last_offset + last_size + kBlockTrailerSize;
     tmp_size = cur_offset - tmp_offset - kBlockTrailerSize;
-    if (!ReadBlock(file, opt, tmp_offset, tmp_size, &block).ok) {
+    if (!(ReadBlock(file, opt, tmp_offset, tmp_size, &block).ok())) {
       return;
     }
-    *filter_data[i++] = block.data;
+    (*filter_data)[i++] = block.data;
 
     last_offset = cur_offset;
     last_size = cur_size;
@@ -155,11 +171,11 @@ void Table::ReadFilter(IndexBlock* index_block, uint64_t index_block_offset,
   }
   tmp_offset = last_offset + last_size + kBlockTrailerSize;
   tmp_size = index_block_offset - tmp_offset - kBlockTrailerSize;
-  if (!ReadBlock(file, opt, tmp_offset, tmp_size, &block).ok) {
+  if (!(ReadBlock(file, opt, tmp_offset, tmp_size, &block).ok())) {
     return;
   }
-  *filter_data[i] = block.data;
-  *filter = new FilterBlockReader(rep_->options.filter_policy, filter_data); 
+  (*filter_data)[i] = block.data;
+  *filter = new FilterBlockReader(options.filter_policy, filter_data); 
 }
 
 Table::~Table() { delete rep_; }
@@ -185,30 +201,34 @@ class Table::Iter : public Iterator {
  private:
   // kv_相当于是多个内部有序的kv数组
   // 现在要通过迭代器以整体有序的方式访问，维护两级索引即可，一级表示在哪个kv数组，二级就是每个数组一个索引
-  std::vector<std::vector<std::pair<const Slice, const Slice> >* > kv_;
+  std::vector<std::vector<std::pair<Slice, Slice> >* > kv_;
   size_t first_index_;
   std::vector<size_t> second_index_;
 
   const Comparator* comparator_;
   Status status_;
+  Table* table_;
 
  public:
-  Iter() {
-    comparator_ = rep_->options.comparator;
-    InitAndRead();
-    first_index_ = kv_.size();
+  Iter(Table* table, const ReadOptions& options) : table_(table) {
+    comparator_ = table_->rep_->options.comparator;
+    InitAndRead(options);
+    first_index_ = -1;
     second_index_ = std::vector<size_t>(kv_.size(), 0);
   };
   ~Iter() {
     for (auto &i : kv_) {
       if (i != nullptr) {
+        for (auto &j : *i) {
+          delete [] j.first.data();
+        }
         delete i;
       }
     }
   }
 
   bool Valid() const override { 
-    if (first_index_ >= kv_.size()) {
+    if (first_index_ < 0 || first_index_ >= kv_.size()) {
       return false;
     }
 
@@ -224,12 +244,12 @@ class Table::Iter : public Iterator {
 
   Slice key() const override {
     assert(Valid());
-    return (*kv_[first_index_])[second_index_].first;
+    return (*kv_[first_index_])[second_index_[first_index_]].first;
   }
 
   Slice value() const override {
     assert(Valid());
-    return (*kv_[first_index_])[second_index_].second;
+    return (*kv_[first_index_])[second_index_[first_index_]].second;
   }
 
   void SeekToFirst() override {
@@ -252,42 +272,44 @@ class Table::Iter : public Iterator {
   void SeekToLast() override {}
 
  private:
-  void InitAndRead() {
-    size_t old_sst_count = rep_->index_blocks->size();
-    kv_.Resize(old_sst_count);
+  void InitAndRead(const ReadOptions& options) {
+    Rep *rep = table_->rep_;
+    size_t old_sst_count = rep->index_blocks->size();
+    kv_.resize(old_sst_count);
     for (int i = 0; i < old_sst_count; ++i) {
       // 初始化大小，避免频繁扩张拷贝，也是Footer中特意存储kv_num的原因
-      kv_[i] = new std::vector<std::pair<const Slice, const Slice> >(rep_->kv_nums[i]);
+      kv_[i] = new std::vector<std::pair<Slice, Slice> >((*(rep->kv_nums))[i]);
 
       // 然后每个index块对应的多个data块解析出来，放进上面new的vector里
-      Cache* block_cache = rep_->options.block_cache;
+      Cache* block_cache = rep->options.block_cache;
       Cache::Handle* cache_handle = nullptr;
       Block* block = nullptr;
+      Status s;
 
-      IndexBlock* index_iter = *(rep_->index_blocks)[i];  // 伪迭代器哈
+      IndexBlock* index_iter = (*(rep->index_blocks))[i];  // 伪迭代器哈
       uint64_t data_block_offset = 0;
       size_t data_block_size = 0;
-      idex_iter->SeekToFirst();
+      index_iter->SeekToFirst();
       size_t cur_index = 0;
-      while (idex_iter->IterVaild()) {
-        idex_iter->Current(data_block_offset, data_block_size);
-        idex_iter->Next();
+      while (index_iter->IterVaild()) {
+        index_iter->Current(data_block_offset, data_block_size);
+        index_iter->Next();
 
         if (block_cache != nullptr) {
           // 此表有过缓存，看看具体的data block在不在缓存，在的话就直接用
           char cache_key_buffer[16];
-          EncodeFixed64(cache_key_buffer, rep_->cache_id);
+          EncodeFixed64(cache_key_buffer, rep->cache_id);
           EncodeFixed64(cache_key_buffer + 8, data_block_offset);
           Slice key(cache_key_buffer, 16);
           cache_handle = block_cache->Lookup(key);
           if (cache_handle != nullptr) {
             block = reinterpret_cast<Block*>(block_cache->Value(cache_handle));
-          } 
+          }
         }
         if (block == nullptr) {
           // 可能是表没缓存，也可能是表有但具体的数据块被冲掉了
           BlockContents contents;
-          s = ReadBlock(rep_->file, options, data_block_offset, data_block_size, &contents);
+          s = ReadBlock(rep->file, options, data_block_offset, data_block_size, &contents);
           if (s.ok()) {
             block = new Block(contents);
           }
@@ -296,20 +318,21 @@ class Table::Iter : public Iterator {
         // 现在数据块拿到了，然后就逐条解析出来放到kv[i]里
         // 因为一个索引块对应的肯定是有序的，所以追加就行
         if (block != nullptr) {
-          block->SeqReadKV(kv_[i], cur_index);
+          block->SeqReadKV(*kv_[i], cur_index);
           // 清理读取解析block过程中的内存和引用计数
           // 现在已经保存在kv_中了，与底层无关了。
           if (cache_handle == nullptr) {
-            DeleteBlock(block);
+            DeleteBlock(block, nullptr);
           } else {
             ReleaseBlock(block_cache, cache_handle);
           }
+          block = nullptr;  // 即使delete 了也要赋值，否则会影响下次循环的判断
         } else {
-          rep_->status = Status::Corruption("create table iter, but InitRead fail, block not exist");
+          rep->status = Status::Corruption("create table iter, but InitRead fail, block not exist");
           return;
         }
       }
-      assert(cur_index == rep_->kv_nums[i]);
+      assert(cur_index == (*(rep->kv_nums))[i]);
     }
   }
   
@@ -318,7 +341,6 @@ class Table::Iter : public Iterator {
   }
 
   void FindSmallest() {
-    assert(Valid());
     int tmp_index = -1;
     for (int i = 0; i < second_index_.size(); ++i) {
       if (second_index_[i] < (*kv_[i]).size()) {
@@ -333,7 +355,7 @@ class Table::Iter : public Iterator {
 };
 
 Iterator* Table::NewIterator(const ReadOptions& options) const {
-  return new Iter();
+  return new Iter(const_cast<Table*>(this), options);
 }
 
 Iterator* Table::BlockReader(void* arg, const ReadOptions& options,
@@ -342,9 +364,10 @@ Iterator* Table::BlockReader(void* arg, const ReadOptions& options,
   Cache* block_cache = table->rep_->options.block_cache;
   Block* block = nullptr;
   Cache::Handle* cache_handle = nullptr;
+  Status s;
+  BlockContents contents;
   
   if (block_cache != nullptr) {
-    BlockContents contents;
     char cache_key_buffer[16];
     EncodeFixed64(cache_key_buffer, table->rep_->cache_id);
     EncodeFixed64(cache_key_buffer + 8, offset);
@@ -394,23 +417,25 @@ Status Table::InternalGet(const ReadOptions& options, const Slice& k, void* arg,
   Block* block = nullptr;
   Cache::Handle* cache_handle = nullptr;
 
+  // std::cout << rep_->index_blocks->size() << std::endl;
   for (int i = 0; i < rep_->index_blocks->size(); ++i) {
-    int j = *(rep_->index_blocks)[i]->Seek(cmp, k, offset, size); 
-    if (j > 0) {
+    int j = (*(rep_->index_blocks))[i]->Seek(cmp, k, offset, size);
+    if (j >= 0) {
       // 如果某个索引中存在，先读过滤器
-      if (rep_->filters == nullptr || *(rep_->filters)[i]->KeyMayMatch(k, j)) {
+      if (rep_->filters == nullptr || (*(rep_->filters))[i]->KeyMayMatch(k, j)) {
         // 过滤器不存在或者存在且找到，则去数据块中找
         // 先去可能存在的缓存看看
-        Iterator* block_iter = BlockReader(this, options, iiter->value());
+        Iterator* block_iter = BlockReader(this, options, offset, size);
         block_iter->Seek(k);
         if (block_iter->Valid()) {
           (*handle_result)(arg, block_iter->key(), block_iter->value());
         }
         s = block_iter->status();
-        delete block_iter;
         if (block_iter->Valid()) {
+          delete block_iter;
           break;
         }
+        delete block_iter;
       }
     }
   }
@@ -418,30 +443,8 @@ Status Table::InternalGet(const ReadOptions& options, const Slice& k, void* arg,
 }
 
 uint64_t Table::ApproximateOffsetOf(const Slice& key) const {
-  Iterator* index_iter =
-      rep_->index_block->NewIterator(rep_->options.comparator);
-  index_iter->Seek(key);
-  uint64_t result;
-  if (index_iter->Valid()) {
-    BlockHandle handle;
-    Slice input = index_iter->value();
-    Status s = handle.DecodeFrom(&input);
-    if (s.ok()) {
-      result = handle.offset();
-    } else {
-      // Strange: we can't decode the block handle in the index block.
-      // We'll just return the offset of the metaindex block, which is
-      // close to the whole file size for this case.
-      result = rep_->metaindex_handle.offset();
-    }
-  } else {
-    // key is past the last key in the file.  Approximate the offset
-    // by returning the offset of the metaindex block (which is
-    // right near the end of the file).
-    result = rep_->metaindex_handle.offset();
-  }
-  delete index_iter;
-  return result;
+  // 暂时无用
+  return 0;
 }
 #else
 struct Table::Rep {

@@ -22,7 +22,6 @@ Status BuildTable(const std::string& dbname, Env* env, const Options& options,
   meta->sst_count = 0;
 #endif
   iter->SeekToFirst();
-
   std::string fname = TableFileName(dbname, meta->number);
   if (iter->Valid()) {
     WritableFile* file;
@@ -67,7 +66,7 @@ Status BuildTable(const std::string& dbname, Env* env, const Options& options,
     if (s.ok()) {
       // Verify that the table is usable
       Cache::Handle* handle = nullptr;
-      s = table_cache->FindTable(file_number, file_size, &handle);
+      s = table_cache->FindTable(meta->number, meta->file_size, &handle);
       table_cache->ReleaseHandle(handle);  // just verify
     }
 #else

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <vector>
+#include <iostream>
 
 #include "leveldb/comparator.h"
 #include "table/format.h"
@@ -302,7 +303,7 @@ void Block::SeqReadKV(std::vector<std::pair<Slice, Slice> > &kv, size_t &index) 
   // buffer_.append(value.data(), value.size());
 
   std::string last_key("");
-  size_t shared_len = 0, non_shared_len = 0, value_len = 0;
+  uint32_t shared_len = 0, non_shared_len = 0, value_len = 0;
   while (cur < end) {
     cur = GetVarint32Ptr(cur, end, &shared_len);
     cur = GetVarint32Ptr(cur, end, &non_shared_len);
@@ -311,7 +312,14 @@ void Block::SeqReadKV(std::vector<std::pair<Slice, Slice> > &kv, size_t &index) 
     last_key.resize(shared_len);
     last_key.append(cur, non_shared_len);
     cur += non_shared_len;
-    kv[index++] = std::pair<Slice, Slice>(last_key, Slice(cur, value_len));
+
+    // 注意，这里保存kv的pair时, key需要new一下，而value不需要
+    // 因为Slice的本质是一个指针和长度，value的指针是取自data_中的某个位置，互不冲突
+    // 而key因为重启点存在，如果一直用last_key去生成Slice, 起始指针其实一样，会冲突
+    char* tmp_key = new char[last_key.size()];
+    memcpy(tmp_key, last_key.data(), last_key.size());
+    kv[index++] = std::pair<Slice, Slice>(Slice(tmp_key, last_key.size()),
+                                          Slice(cur, value_len));
     cur += value_len;
   }
   assert(cur == end);
@@ -327,11 +335,12 @@ IndexBlock::IndexBlock(const BlockContents& contents, size_t index_count) {
   current_ = 0;
 
   const char* cur = data_, *end = cur + contents.data.size();
+  std::cout << "Indexblock size:" << contents.data.size() << std::endl;
   for (int i = 0; i < index_count; ++i) {
     // key len
     uint32_t value = 0;
     cur = GetVarint32Ptr(cur, end, &value);
-    if (!cur) {  // bad index_block format
+    if (cur == nullptr) {  // bad index_block format
       index_count_ = 0;
       break;
     }
@@ -375,13 +384,13 @@ int IndexBlock::Seek(const Comparator* comparator, const Slice &key,
     return -1;
   }
   // 懒得用二分了
-  if (comparator->Compare(keys_[index_count_ - 1], keyIn) < 0) {
+  if (comparator->Compare(keys_[index_count_ - 1], key) < 0) {
     return -1;
   }
   for (int i = 0; i < index_count_; ++i) {
     if (comparator->Compare(key, keys_[i]) <= 0) {
-      offset = offset_[i];
-      size = size_[i];
+      offset = offsets_[i];
+      size = (size_t)sizes_[i];
       return i;
     }
   }

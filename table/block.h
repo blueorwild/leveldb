@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #include "leveldb/iterator.h"
 
@@ -30,7 +31,7 @@ class Block {
 
 #ifdef MZP
   // 专用于data block,不想用迭代器了，直接依次读到传进来的容器里。
-  void SeqReadKV(std::vector<std::pair<Slice, Slice> > &kv);
+  void SeqReadKV(std::vector<std::pair<Slice, Slice> > &kv, size_t &index);
 #endif
 
  private:
@@ -63,14 +64,14 @@ class IndexBlock {
   void SeekToLast() { current_ = index_count_ - 1; };
   const Slice& Current(uint64_t &offset, size_t &size);
   int Seek(const Comparator* comparator, const Slice &key, uint64_t &offset, size_t &size);
-  void Next() { ++current_ } ;
-  bool IterVaild() { return current_ < index_count_ };
+  void Next() { ++current_; };
+  bool IterVaild() { return current_ < index_count_; };
 
  private:
 
   std::vector<Slice> keys_;
   std::vector<uint64_t> offsets_;
-  std::vector<size_t> sizes_;
+  std::vector<uint32_t> sizes_;
 
   size_t index_count_;
   const char* data_;

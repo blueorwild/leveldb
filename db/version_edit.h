@@ -27,6 +27,17 @@ struct FileMetaData {
 #endif
   InternalKey smallest;  // Smallest internal key served by table
   InternalKey largest;   // Largest internal key served by table
+
+#ifdef MZP
+  void Print() {
+    std::cout << "file print------------" << std::endl;
+    std::cout << sst_count << " " << number << " " << file_size << " ";
+    std::cout << std::string(smallest.Encode().data(), smallest.Encode().size() - 8)
+              << " ";
+    std::cout << std::string(largest.Encode().data(), largest.Encode().size() - 8)
+              << std::endl;
+  }
+#endif
 };
 
 class VersionEdit {

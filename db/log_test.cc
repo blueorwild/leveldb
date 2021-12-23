@@ -168,6 +168,11 @@ class LogTest : public testing::Test {
       contents_.append(slice.data(), slice.size());
       return Status::OK();
     }
+#ifdef MZP
+    Status Flush(bool lock) {return Status::OK();};
+    Status MoveTo(uint64_t offset) {return Status::OK();};
+    Status MoveToEnd(uint64_t &file_size) {return Status::OK();};
+#endif
 
     std::string contents_;
   };

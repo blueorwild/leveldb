@@ -151,6 +151,12 @@ class InternalKey {
     return rep_;
   }
 
+#ifdef MZP
+  bool empty() const {
+    return rep_.empty();
+  }
+#endif
+
   Slice user_key() const { return ExtractUserKey(rep_); }
 
   void SetFrom(const ParsedInternalKey& p) {

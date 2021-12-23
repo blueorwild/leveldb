@@ -25,6 +25,9 @@ class TableCache;
 class Version;
 class VersionEdit;
 class VersionSet;
+#ifdef MZP
+struct FileMetaData;
+#endif
 
 class DBImpl : public DB {
  public:
@@ -151,11 +154,14 @@ class DBImpl : public DB {
 #ifdef MZP
   Status OpenAppendOutputFile(CompactionState* compact, FileMetaData* f);
   Status FinishAppendOutputFile(CompactionState* compact, Iterator* input);
-  Status InstallCompactionResults(CompactionState* compact,
-    std::vector<FileMetaData*> inputs1_clean_files) EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 #endif
+#ifdef MZP
+  Status InstallCompactionResults(CompactionState* compact,
+    std::set<FileMetaData*> &inputs1_clean_files) EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+#else
   Status InstallCompactionResults(CompactionState* compact)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+#endif
 
   const Comparator* user_comparator() const {
     return internal_comparator_.user_comparator();

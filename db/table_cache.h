@@ -27,7 +27,16 @@ class TableCache {
 
   // 根据文件号和文件大小 尝试从缓存中找到该文件并返回缓存节点handle
   // 如果缓存中没有则新建该文件，放入缓存并返回handle。
+#ifdef MZP
+  // force是用于追加文件时强制更新缓存，即默认缓存中没有
+  Status FindTable(uint64_t file_number, uint64_t file_size, Cache::Handle**,
+                   bool force = true);
+#else
   Status FindTable(uint64_t file_number, uint64_t file_size, Cache::Handle**);
+#endif
+
+  Iterator* NewIterator(const ReadOptions& options, uint64_t file_number,
+                        uint64_t file_size, Table** tableptr = nullptr);
 
   // If a seek to internal key "k" in specified file finds an entry,
   // call (*handle_result)(arg, found_key, found_value).
@@ -39,7 +48,7 @@ class TableCache {
   void Evict(uint64_t file_number);
   
   // 此函数用于释放FindTable返回的handle
-  void TableCache::ReleaseHandle(Cache::Handle* h);
+  void ReleaseHandle(Cache::Handle* h);
 
  private:
 

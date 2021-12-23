@@ -218,11 +218,11 @@ class PosixRandomAccessFile final : public RandomAccessFile {
   Status Read(uint64_t offset, size_t n, Slice* result,
               char* scratch, bool lock) const override {
     if (lock) {
-      header_mutex_->lock();
+      header_mutex_->Lock();
     }
     Status s = Read(offset, n, result, scratch);
     if (lock) {
-      header_mutex_->unlock();
+      header_mutex_->Unlock();
     }
     return s;
   }
@@ -288,11 +288,11 @@ class PosixMmapReadableFile final : public RandomAccessFile {
   Status Read(uint64_t offset, size_t n, Slice* result,
               char* scratch, bool lock) const override {
     if (lock) {
-      header_mutex_->lock();
+      header_mutex_->Lock();
     }
     Status s = Read(offset, n, result, scratch);
     if (lock) {
-      header_mutex_->unlock();
+      header_mutex_->Unlock();
     }
     return s;
   }
@@ -376,13 +376,13 @@ class PosixWritableFile final : public WritableFile {
 
   Status Flush() override { return FlushBuffer(); }
 #ifdef MZP
-  Status Flush(bool lock) {
+  Status Flush(bool lock) override {
     if (lock) {
-      header_mutex_->lock();
+      header_mutex_->Lock();
     }
     Status s = FlushBuffer();
     if (lock) {
-      header_mutex_->unlock();
+      header_mutex_->Unlock();
     }
     return s;
   }
@@ -408,7 +408,7 @@ class PosixWritableFile final : public WritableFile {
   }
 
 #ifdef MZP
-  Status MoveTo(uint64_t offset) {
+  Status MoveTo(uint64_t offset) override {
     // 把文件读写指针移动到指定偏移（相对于文件起始位置）
     if (::lseek(fd_, offset, SEEK_SET) == -1) {
       return Status::IOError(filename_, Slice("lseek fail"));
@@ -416,7 +416,7 @@ class PosixWritableFile final : public WritableFile {
       return Status::OK();
     }
   }
-  Status MoveToEnd(uint64_t &file_size) {
+  Status MoveToEnd(uint64_t &file_size) override {
     file_size = ::lseek(fd_, 0, SEEK_END);
     if (file_size == -1) {
       return Status::IOError(filename_, Slice("lseek fail"));
@@ -665,8 +665,11 @@ class PosixEnv : public Env {
       *result = nullptr;
       return PosixError(filename, errno);
     }
-
+#ifdef MZP
+    *result = new PosixWritableFile(filename, fd, &header_mutex_);
+#else
     *result = new PosixWritableFile(filename, fd);
+#endif
     return Status::OK();
   }
 
@@ -693,8 +696,11 @@ class PosixEnv : public Env {
       *result = nullptr;
       return PosixError(filename, errno);
     }
-
+#ifdef MZP
+    *result = new PosixWritableFile(filename, fd, &header_mutex_);
+#else
     *result = new PosixWritableFile(filename, fd);
+#endif
     return Status::OK();
   }
 

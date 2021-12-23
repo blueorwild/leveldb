@@ -35,6 +35,7 @@
 #include <cstdint>
 #include <mutex>  // NOLINT
 #include <string>
+#include <iostream>
 
 #include "port/thread_annotations.h"
 
@@ -104,8 +105,10 @@ inline bool Snappy_Compress(const char* input, size_t length,
 inline bool Snappy_GetUncompressedLength(const char* input, size_t length,
                                          size_t* result) {
 #if HAVE_SNAPPY
+  std::cout << "have snappy" << std::endl;
   return snappy::GetUncompressedLength(input, length, result);
 #else
+  std::cout << "not have snappy" << std::endl;
   // Silence compiler warnings about unused arguments.
   (void)input;
   (void)length;

@@ -101,6 +101,11 @@ class StringSink : public WritableFile {
     contents_.append(data.data(), data.size());
     return Status::OK();
   }
+#ifdef MZP
+  Status Flush(bool lock) {return Status::OK();};
+  Status MoveTo(uint64_t offset) {return Status::OK();};
+  Status MoveToEnd(uint64_t &file_size) {return Status::OK();};
+#endif
 
  private:
   std::string contents_;
@@ -127,6 +132,10 @@ class StringSource : public RandomAccessFile {
     *result = Slice(scratch, n);
     return Status::OK();
   }
+#ifdef MZP
+  Status Read(uint64_t offset, size_t n, Slice* result,
+              char* scratch, bool lock) const override {return Status::OK();}
+#endif
 
  private:
   std::string contents_;

@@ -25,7 +25,8 @@ class FilterPolicy;
 class FilterBlockBuilder {
  public:
   
-  explicit FilterBlockBuilder(const FilterPolicy*) : policy_(policy), key_count_(0) {
+  explicit FilterBlockBuilder(const FilterPolicy* policy) : policy_(policy), key_count_(0) {
+    kInitKeyCount = 128;
     tmp_keys_.resize(kInitKeyCount);   // 减缓频繁扩容
   };
 
@@ -37,7 +38,7 @@ class FilterBlockBuilder {
   void Reset();
 
  private:
-  static int kInitKeyCount = 128;
+  int kInitKeyCount;
 
   const FilterPolicy* policy_;
   std::string result_;           // Filter data computed so far
@@ -49,14 +50,18 @@ class FilterBlockBuilder {
 class FilterBlockReader {
  public:
   // REQUIRES: "contents" and *policy must stay live while *this is live.
-  FilterBlockReader(const FilterPolicy* policy, const std::vector<const Slice>* filter):
+  FilterBlockReader(const FilterPolicy* policy, const std::vector<Slice>* filter):
                     policy_(policy), filter_(filter) {};
-  ~FilterBlockReader() { delete filter_; };
+  ~FilterBlockReader() {
+    if (filter_ != nullptr) {
+      delete filter_;
+    }  
+  };
   bool KeyMayMatch(const Slice& key, size_t filter_index);
 
  private:
   const FilterPolicy* policy_;
-  const std::vector<const Slice>* filter_;    // Pointer to filter data (at block-start)
+  const std::vector<Slice>* filter_;    // Pointer to filter data (at block-start)
 };
 #else
 // A FilterBlockBuilder is used to construct all of the filters for a
