@@ -29,7 +29,6 @@ class MergingIterator : public Iterator {
     for (int i = 0; i < n; ++i) {
       children_[i] = children[i];
     }
-    std::cout << "MergingIterator" << std::endl;
   }
 
   ~MergingIterator() override {}

@@ -83,13 +83,11 @@ Status ReadBlock(RandomAccessFile* file, const ReadOptions& options,
     case kSnappyCompression: {
       size_t ulength = 0;
       if (!port::Snappy_GetUncompressedLength(data, n, &ulength)) {
-        std::cout << "2-1" << std::endl;
         delete[] buf;
         return Status::Corruption("corrupted compressed block contents");
       }
       char* ubuf = new char[ulength];
       if (!port::Snappy_Uncompress(data, n, ubuf)) {
-        std::cout << "2-2" << std::endl;
         delete[] buf;
         delete[] ubuf;
         return Status::Corruption("corrupted compressed block contents");

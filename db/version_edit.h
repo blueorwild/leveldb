@@ -23,7 +23,7 @@ struct FileMetaData {
   uint64_t number;
   uint64_t file_size;    // File size in bytes
 #ifdef MZP
-  size_t sst_count;      // a new sst include how many old_sst
+  uint32_t sst_count;      // a new sst include how many old_sst
 #endif
   InternalKey smallest;  // Smallest internal key served by table
   InternalKey largest;   // Largest internal key served by table
@@ -72,7 +72,7 @@ class VersionEdit {
   }
 
 #ifdef MZP
-  void AddFile(int level, uint64_t file, uint64_t file_size, size_t sst_count,
+  void AddFile(int level, uint64_t file, uint64_t file_size, uint32_t sst_count,
                const InternalKey& smallest, const InternalKey& largest) {
     FileMetaData f;
     f.number = file;

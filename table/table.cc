@@ -55,11 +55,9 @@ Status Table::Open(const Options& options, RandomAccessFile* file,
   // 读 header
   char header_space[header_size];
   Slice header_input;
-  std::cout << "Open 1" << std::endl;
   Status s = file->Read(0, header_size, &header_input, header_space, true);  // 安全读
   if (!s.ok()) return s;
   Header header;
-  std::cout << "Open 2" << std::endl;
   s = header.DecodeFrom(&header_input);
   if (!s.ok()) return s;
 
@@ -76,11 +74,9 @@ Status Table::Open(const Options& options, RandomAccessFile* file,
 
   for (int i = 0; i < footer_count; ++i){
     footer_offset = header.get_offset(i);
-    std::cout << "Open 3" << footer_offset << std::endl;
     Status s = file->Read(footer_offset, Footer::kFooterSize, &footer_input, footer_space);
     if (!s.ok()) return s;
 
-    std::cout << "Open 4" << std::endl;
     s = footer.DecodeFrom(&footer_input);
     if (!s.ok()) return s;
 
@@ -92,14 +88,10 @@ Status Table::Open(const Options& options, RandomAccessFile* file,
     if (options.paranoid_checks) {
       opt.verify_checksums = true;
     }
-    std::cout << "Open 5: " << footer.GetIndexBlockOffset() << " "
-              << footer.GetIndexBlockSize() << " " 
-              << footer.GetIndexCount() << std::endl;
     s = ReadBlock(file, opt, footer.GetIndexBlockOffset(),
                   footer.GetIndexBlockSize(), &index_block_input);
     IndexBlock* index_block = new IndexBlock(index_block_input, footer.GetIndexCount());
     if (!index_block->vaild()) {
-      std::cout << "bad indexBlock" << std::endl;
       s = Status::Corruption("bad indexBlock");
       delete index_block;
     }
@@ -417,7 +409,6 @@ Status Table::InternalGet(const ReadOptions& options, const Slice& k, void* arg,
   Block* block = nullptr;
   Cache::Handle* cache_handle = nullptr;
 
-  // std::cout << rep_->index_blocks->size() << std::endl;
   for (int i = 0; i < rep_->index_blocks->size(); ++i) {
     int j = (*(rep_->index_blocks))[i]->Seek(cmp, k, offset, size);
     if (j >= 0) {

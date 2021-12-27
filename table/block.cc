@@ -335,7 +335,6 @@ IndexBlock::IndexBlock(const BlockContents& contents, size_t index_count) {
   current_ = 0;
 
   const char* cur = data_, *end = cur + contents.data.size();
-  std::cout << "Indexblock size:" << contents.data.size() << std::endl;
   for (int i = 0; i < index_count; ++i) {
     // key len
     uint32_t value = 0;

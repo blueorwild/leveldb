@@ -61,7 +61,7 @@ struct DBImpl::CompactionState {
     uint64_t file_size;
     InternalKey smallest, largest;
 #ifdef MZP
-    size_t sst_count;
+    uint32_t sst_count;
 #endif
   };
 
@@ -735,10 +735,7 @@ void DBImpl::BackgroundCompaction() {
   }
 
    // 不考虑manual!!!
-  std::cout << "PickCompaction start" << std::endl;
   Compaction* c = versions_->PickCompaction();
-  std::cout << "PickCompaction end" << std::endl;
-
 
   Status status;
   if (c == nullptr) {
@@ -919,7 +916,6 @@ Status DBImpl::OpenAppendOutputFile(CompactionState* compact, FileMetaData* f) {
   std::string fname = TableFileName(dbname_, f->number);
   Status s = env_->NewRandomWritableFile(fname, &compact->outfile);
   if (s.ok()) {
-    std::cout << "Open 追加文件" << std::endl;
     compact->builder = new TableBuilder(options_, compact->outfile);
     compact->builder->MoveToEnd();
     compact->current_alter = f;
@@ -993,7 +989,7 @@ Status DBImpl::InstallCompactionResults(CompactionState* compact,
   // 文件变更应用到版本edit，包括删除的，新增的，更改的
   compact->compaction->AddInputDeletions(compact->compaction->edit(), inputs1_clean_files);
   for (auto &out : compact->outputs) {
-    std::cout << "outputs" << std::endl;
+    std::cout << "outputs: ";
     auto k = out.smallest.Encode();
     std::cout << out.sst_count << "  " << std::string(k.data(), k.size()-8);
     k = out.largest.Encode();
@@ -1002,7 +998,7 @@ Status DBImpl::InstallCompactionResults(CompactionState* compact,
                                          out.sst_count, out.smallest, out.largest);
   }
   for (auto &f : compact->alters) {
-    std::cout << "alters" << std::endl;
+    std::cout << "alters: ";
     auto k = f->smallest.Encode();
     std::cout << f->sst_count << "  " << std::string(k.data(), k.size()-8);
     k = f->largest.Encode();
@@ -1099,13 +1095,6 @@ Status DBImpl::FinishCompactionOutputFile(CompactionState* compact,
   compact->current_new = -1;
 #endif
 
-  auto file = compact->current_output();
-  std::cout << "new file" << file->number << std::endl;
-  auto k = file->smallest.Encode();
-  std::cout << std::string(k.data(), k.size() - 8) << std::endl;
-  k = file->largest.Encode();
-  std::cout << std::string(k.data(), k.size() - 8) << std::endl;
-
   if (s.ok() && current_entries > 0) {
     // Verify that the table is usable
 #ifdef MZP
@@ -1135,7 +1124,6 @@ Status DBImpl::FinishCompactionOutputFile(CompactionState* compact,
 // 这里需要先对下层文件排个序？塞采用左超右不超的原则（最后一个右超的new）。
 // 如果塞时发现文件大小超过阈值或sst_count达到阈值，那就new。
 Status DBImpl::DoCompactionWork(CompactionState* compact) {
-  std::cout << "DoCompactionWork 1" << std::endl;
   const uint64_t start_micros = env_->NowMicros();
   int64_t imm_micros = 0;  // Micros spent doing imm_ compactions
 
@@ -1168,7 +1156,6 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
   SequenceNumber last_sequence_for_key = kMaxSequenceNumber;
   int current_input1_index = 0;
   int input1_file_num = compact->compaction->num_input_files(1);
-  std::cout << "DoCompactionWork 2: " << input1_file_num << std::endl;
   while (input->Valid() && !shutting_down_.load(std::memory_order_acquire)) {
     // 如果有内存刷盘，先执行内存刷盘
     if (has_imm_.load(std::memory_order_relaxed)) {
@@ -1226,7 +1213,6 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
     // 1) 下层有对应key范围的文件且没达到sst_count(这个属于输入部分了)，那么直接追加。
     // 2) 否则写新文件(或者之前建立的新文件)
     if (!drop) {
-      // std::cout << std::string(key.data(), key.size()-8) << std::endl;
       Loop1:
       if (input1_file_num != 0 && current_input1_index < input1_file_num) {
         FileMetaData* f = compact->compaction->input(1, current_input1_index);
@@ -1268,15 +1254,6 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
           // else 下层有对应key范围的文件，但属于输入部分，则new
         } else {
           // 下层当前文件不对应key范围(key超过了下层文件的最大值)
-          std::cout << "cur_index:" << current_input1_index << std::endl;
-          std::cout << std::string(key.data(), key.size()-8) << std::endl;
-
-          auto k = f->smallest.Encode();
-          std::cout << std::string(k.data(), k.size()-8) << std::endl;
-
-          k = f->largest.Encode();
-          std::cout << std::string(k.data(), k.size()-8) << std::endl;
-
           ++current_input1_index;
           goto Loop1;
         }

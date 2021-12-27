@@ -96,12 +96,6 @@ void BlockBuilder::Add(const Slice& key, const Slice& value) {
   // Add string delta to buffer_ followed by value
   buffer_.append(key.data() + shared, non_shared);
   buffer_.append(value.data(), value.size());
-  std::string mzp("test_value100000", 16);
-  std::string pyf(value.data(), 16);
-  if (mzp == pyf) {
-    std::cout << shared << ", " << non_shared << std::endl;
-    std::cout << std::string(key.data(), key.size() - 8) << std::endl;
-  }
 
   // Update state
   last_key_.resize(shared);

@@ -74,6 +74,26 @@ void VersionEdit::EncodeTo(std::string* dst) const {
     PutVarint32(dst, deleted_file_kvp.first);   // level
     PutVarint64(dst, deleted_file_kvp.second);  // file number
   }
+  #ifdef MZP
+  // 这里针对追加修改的文件，也要记录信息，不然数据库重启后修改文件的元数据信息会是最老版的
+  // 为了最小改动，追加修改的文件的信息记录就先删除，然后新增了
+  // 当然，要考虑新的元数据sst_count
+  for (const auto& alter_file_kvp : alter_files_) {
+    PutVarint32(dst, kDeletedFile);
+    PutVarint32(dst, alter_file_kvp.first);   // level
+    PutVarint64(dst, alter_file_kvp.second.number);  // file number
+  }
+  for (const auto& alter_file_kvp : alter_files_) {
+    const FileMetaData& f = alter_file_kvp.second;
+    PutVarint32(dst, kNewFile);
+    PutVarint32(dst, alter_file_kvp.first);  // level
+    PutVarint64(dst, f.number);
+    PutVarint64(dst, f.file_size);
+    PutVarint32(dst, f.sst_count);
+    PutLengthPrefixedSlice(dst, f.smallest.Encode());
+    PutLengthPrefixedSlice(dst, f.largest.Encode());
+  }
+  #endif
 
   for (size_t i = 0; i < new_files_.size(); i++) {
     const FileMetaData& f = new_files_[i].second;
@@ -81,6 +101,9 @@ void VersionEdit::EncodeTo(std::string* dst) const {
     PutVarint32(dst, new_files_[i].first);  // level
     PutVarint64(dst, f.number);
     PutVarint64(dst, f.file_size);
+#ifdef MZP
+    PutVarint32(dst, f.sst_count);
+#endif
     PutLengthPrefixedSlice(dst, f.smallest.Encode());
     PutLengthPrefixedSlice(dst, f.largest.Encode());
   }
@@ -180,6 +203,9 @@ Status VersionEdit::DecodeFrom(const Slice& src) {
       case kNewFile:
         if (GetLevel(&input, &level) && GetVarint64(&input, &f.number) &&
             GetVarint64(&input, &f.file_size) &&
+#ifdef MZP
+            GetVarint32(&input, &f.sst_count) &&
+#endif
             GetInternalKey(&input, &f.smallest) &&
             GetInternalKey(&input, &f.largest)) {
           new_files_.push_back(std::make_pair(level, f));

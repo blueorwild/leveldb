@@ -49,7 +49,6 @@ Status TableCache::FindTable(uint64_t file_number, uint64_t file_size,
     *handle = cache_->Lookup(key);
   }
   if (*handle == nullptr) {
-    std::cout << file_size << std::endl;
     std::string fname = TableFileName(dbname_, file_number);
     RandomAccessFile* file = nullptr;
     Table* table = nullptr;
@@ -61,25 +60,19 @@ Status TableCache::FindTable(uint64_t file_number, uint64_t file_size,
       }
     }
     if (s.ok()) {
-      std::cout << "new file Open" << std::endl;
       s = Table::Open(options_, file, file_size, &table);
-      std::cout << "new file Open End" << std::endl;
     }
 
     if (!s.ok()) {
-      std::cout << "s not ok" << std::endl;
       assert(table == nullptr);
       delete file;
       // We do not cache error results so that if the error is transient,
       // or somebody repairs the file, we recover automatically.
     } else {
-      std::cout << "oh" << std::endl;
       TableAndFile* tf = new TableAndFile;
       tf->file = file;
       tf->table = table;
-      std::cout << "cache Insert" << std::endl;
       *handle = cache_->Insert(key, tf, 1, &DeleteEntry);
-      std::cout << "cache End" << std::endl;
     }
   }
   return s;

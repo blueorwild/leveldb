@@ -266,7 +266,7 @@ Status TableBuilder::Finish() {
   return r->status;
 }
 
-Status TableBuilder::AppendFinish(size_t sst_count) {
+Status TableBuilder::AppendFinish(uint32_t sst_count) {
   Rep* r = rep_;
   Flush();
   assert(!r->closed);
@@ -435,8 +435,6 @@ void TableBuilder::Add(const Slice& key, const Slice& value) {
   }
 
   if (r->pending_index_entry) {
-    // std::cout << "offset: " << r->pending_handle.offset() << std::endl;
-    // std::cout << "size: " << r->pending_handle.size() << std::endl;
     assert(r->data_block.empty());
     r->options.comparator->FindShortestSeparator(&r->last_key, key);
     std::string handle_encoding;

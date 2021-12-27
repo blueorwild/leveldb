@@ -363,7 +363,7 @@ Status Version::Get(const ReadOptions& options, const LookupKey& k,
       state->last_file_read = f;
       state->last_file_read_level = level;
 
-      f->Print();
+      // f->Print();
       state->s = state->vset->table_cache_->Get(*state->options, f->number,
                                                 f->file_size, state->ikey,
                                                 &state->saver, SaveValue);
@@ -528,7 +528,6 @@ void Version::GetOverlappingInputs(int level, InternalKey* begin,
                                    std::vector<FileMetaData*>* inputs) {
   // 扩张无论是0层还是非0层都一样，左边界根据internal_key来，小于的排除，右边界根据user_key来，大于的排除
   assert(level >= 0 && level < config::kNumLevels);
-  std::cout << "before extend, inputs.size: " << inputs->size() << std::endl;
   inputs->clear();
   const auto internal_cmp = &vset_->icmp_;
   const Comparator* user_cmp = vset_->icmp_.user_comparator();
@@ -552,14 +551,6 @@ void Version::GetOverlappingInputs(int level, InternalKey* begin,
         i = 0;
       }
     }
-  }
-
-  std::cout << "after extend, inputs.size: " << inputs->size() << std::endl;
-  for (auto &f : *inputs) {
-    std::string min_key(f->smallest.user_key().data(), f->smallest.user_key().size());
-    std::string max_key(f->largest.user_key().data(), f->largest.user_key().size());
-    std::cout << "min_key: " << min_key << std::endl;
-    std::cout << "max_key: " << max_key << std::endl;
   }
 }
 
@@ -1577,7 +1568,6 @@ Compaction* VersionSet::PickCompaction() {
 
   // 优先size触发的合并
   // 确定初始上层文件
-  std::cout << "PickCompaction 1, level: " << current_->compaction_level_ << std::endl;
   if (current_->compaction_score_ >= 1) {  
     level = current_->compaction_level_;
     c = new Compaction(options_, level);
@@ -1601,18 +1591,14 @@ Compaction* VersionSet::PickCompaction() {
   } else {
     return nullptr;
   }
-  std::cout << "PickCompaction 2" << std::endl;
   
   // 扩张上层文件
   c->input_version_ = current_;
   c->input_version_->Ref();
   InternalKey smallest, largest;
-  std::cout << "PickCompaction 2.4" << std::endl;
   GetRange(c->inputs_[0], &smallest, &largest);
-  std::cout << "PickCompaction 2.5" << std::endl;
   current_->GetOverlappingInputs(level, &smallest, &largest, &c->inputs_[0]);
   assert(!c->inputs_[0].empty());
-  std::cout << "PickCompaction 3" << std::endl;
 
   // 现在来选择下层文件
   current_->GetOverlappingInputs(level + 1, &smallest, &largest, &c->inputs_[1]);
@@ -1652,7 +1638,6 @@ Compaction* VersionSet::PickCompaction() {
       }
     }
   }
-  std::cout << "PickCompaction 4" << std::endl;
 
   // 现在上下层都选好了，更新上层文件合并的最大key，下次从这之后
   InternalKey new_largest = c->inputs_[0][0]->largest;
@@ -1663,7 +1648,6 @@ Compaction* VersionSet::PickCompaction() {
   }
   compact_pointer_[level] = new_largest.Encode().ToString();
   c->edit_.SetCompactPointer(level, largest);
-  std::cout << "PickCompaction 5" << std::endl;
 
   return c;
 }

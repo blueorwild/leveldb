@@ -82,7 +82,7 @@ class LEVELDB_EXPORT TableBuilder {
 #ifdef MZP
   void MoveToEnd();
   // 专用于追加合并时的文件结束，区别就是更改Header，而不是写新的Header
-  Status AppendFinish(size_t sst_count);
+  Status AppendFinish(uint32_t sst_count);
 #endif
 
  private:
