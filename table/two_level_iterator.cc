@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
+#include <vector>
 #include "table/two_level_iterator.h"
 
 #include "leveldb/table.h"
@@ -13,8 +14,87 @@ namespace leveldb {
 
 namespace {
 
+// TableCache* cache = reinterpret_cast<TableCache*>(arg);
+//   if (file_value.size() != 16) {
+//     return NewErrorIterator(
+//         Status::Corruption("FileReader invoked with unexpected value"));
+//   } else {
+//     return cache->NewIterator(options, DecodeFixed64(file_value.data()),
+//                               DecodeFixed64(file_value.data() + 8));
+//   }
+// 初始化下层迭代器的函数
+// void*是迭代器的真实数据位置（如cache），Slice 就是构建迭代器的数据块信息
 typedef Iterator* (*BlockFunction)(void*, const ReadOptions&, const Slice&);
+#ifdef MZP
+class TwoLevelIterator : public Iterator {
+ // 串联迭代器，就是顺序访问多个迭代器，访问到哪个才会按需初始化
+ private:
+  int cur_index_;
+  Iterator* data_iter_;
 
+  BlockFunction block_function_;
+  void* arg_;
+  const ReadOptions options_;
+  std::vector<Slice> iter_info_;
+
+ public:
+  TwoLevelIterator(std::vector<Slice> &iter_info, BlockFunction block_function,
+                   void* arg, const ReadOptions& options) : cur_index_(0),
+                   data_iter_(nullptr), block_function_(block_function),
+                   arg_(arg), options_(options), iter_info_(iter_info) {
+    // iter_info_ = std::vector<Slice>(iter_info.begin(), iter_info.end());
+  }
+
+  ~TwoLevelIterator() {
+    for (auto &info : iter_info_) {
+      delete[] info.data();
+    }
+  }
+
+  Slice key() const override {
+    assert(Valid());
+    return data_iter_->key();
+  }
+
+  Slice value() const override {
+    assert(Valid());
+    return data_iter_->value();
+  }
+
+  bool Valid() const override { return data_iter_ != nullptr && data_iter_->Valid(); }
+
+  void SeekToFirst() override {
+    cur_index_ = 0;
+    data_iter_ = (*block_function_)(arg_, options_, iter_info_[cur_index_]);
+    while (!Valid() && cur_index_ < iter_info_.size()) {
+      ++cur_index_;
+      data_iter_ = (*block_function_)(arg_, options_, iter_info_[cur_index_]);
+    }
+  }
+
+  void Next() override {
+    assert(Valid());
+    data_iter_->Next();
+    while (!Valid() && cur_index_ < iter_info_.size()) {
+      ++cur_index_;
+      data_iter_ = (*block_function_)(arg_, options_, iter_info_[cur_index_]);
+    }
+  }
+
+  Status status() const override {
+    Status status;
+    if (data_iter_ != nullptr) {
+      return data_iter_->status();
+    }
+    return Status::NotFound("TwoLevelIterator just init");
+  }
+
+  // 暂时不需要
+  void SeekToLast() override {}
+  void Seek(const Slice& target) override {}
+  void Prev() override {}
+};
+#else
 class TwoLevelIterator : public Iterator {
  public:
   TwoLevelIterator(Iterator* index_iter, BlockFunction block_function,
@@ -159,13 +239,21 @@ void TwoLevelIterator::InitDataBlock() {
     }
   }
 }
-
+#endif
 }  // namespace
 
+#ifdef MZP
+Iterator* NewTwoLevelIterator(std::vector<Slice> &iter_info,
+                              BlockFunction block_function,
+                              void* arg, const ReadOptions& options) {
+  return new TwoLevelIterator(iter_info, block_function, arg, options);
+}
+#else
 Iterator* NewTwoLevelIterator(Iterator* index_iter,
                               BlockFunction block_function, void* arg,
                               const ReadOptions& options) {
   return new TwoLevelIterator(index_iter, block_function, arg, options);
 }
+#endif
 
 }  // namespace leveldb

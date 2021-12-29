@@ -382,18 +382,22 @@ int IndexBlock::Seek(const Comparator* comparator, const Slice &key,
   if (index_count_ <= 0) {
     return -1;
   }
-  // 懒得用二分了
   if (comparator->Compare(keys_[index_count_ - 1], key) < 0) {
     return -1;
   }
-  for (int i = 0; i < index_count_; ++i) {
-    if (comparator->Compare(key, keys_[i]) <= 0) {
-      offset = offsets_[i];
-      size = (size_t)sizes_[i];
-      return i;
+  // 二分
+  int L = 0, R = index_count_ - 1, mid;
+  while (L < R) {
+    mid = (L + R) >> 1;
+    if (comparator->Compare(key, keys_[mid]) > 0) {
+      L = mid + 1;
+    } else {
+      R = mid;
     }
   }
-  return -1;
+  offset = offsets_[L];
+  size = (size_t)sizes_[L];
+  return L;
 }
 #endif
 

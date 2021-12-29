@@ -284,10 +284,11 @@ Status TableBuilder::AppendFinish(uint32_t sst_count) {
       footer.SetIndexBlockSize(r->index_block.size());
       footer.SetIndexCount(r->index_block.GetIndexCount());
       footer.SetKvNum(r->num_entries);
-      std::string filter_name("filter.");
-      filter_name += std::string(r->options.filter_policy->Name());
-      footer.SetFilterName(filter_name);
-
+      if (r->options.filter_policy != nullptr) {
+        std::string filter_name("filter.");
+        filter_name += std::string(r->options.filter_policy->Name());
+        footer.SetFilterName(filter_name);
+      }
       // add type and crc
       char trailer[kBlockTrailerSize];
       trailer[0] = kNoCompression;   // 新的方式indexblock不压缩了，其实本来也没用snappy

@@ -334,11 +334,13 @@ class Table::Iter : public Iterator {
 
   void FindSmallest() {
     int tmp_index = -1;
+    Slice tmp_key;
     for (int i = 0; i < second_index_.size(); ++i) {
-      if (second_index_[i] < (*kv_[i]).size()) {
-        if (tmp_index < 0 || 
-            Compare((*kv_[i])[second_index_[i]].first, (*kv_[i])[second_index_[tmp_index]].first) < 0) {
+      if (second_index_[i] < kv_[i]->size()) {
+        auto &key = (*(kv_[i]))[second_index_[i]].first;
+        if (tmp_key.empty() || Compare(key, tmp_key) < 0) {
           tmp_index = i;
+          tmp_key = key;
         }
       }
     }
@@ -409,6 +411,7 @@ Status Table::InternalGet(const ReadOptions& options, const Slice& k, void* arg,
   Block* block = nullptr;
   Cache::Handle* cache_handle = nullptr;
 
+  bool found = false;
   for (int i = 0; i < rep_->index_blocks->size(); ++i) {
     int j = (*(rep_->index_blocks))[i]->Seek(cmp, k, offset, size);
     if (j >= 0) {
@@ -419,14 +422,19 @@ Status Table::InternalGet(const ReadOptions& options, const Slice& k, void* arg,
         Iterator* block_iter = BlockReader(this, options, offset, size);
         block_iter->Seek(k);
         if (block_iter->Valid()) {
-          (*handle_result)(arg, block_iter->key(), block_iter->value());
+          // vaild不代表找到了
+          if (memcmp(k.data(), block_iter->key().data(), k.size() - 8) == 0) {
+            (*handle_result)(arg, block_iter->key(), block_iter->value());
+            found = true;
+          }
+          
         }
         s = block_iter->status();
-        if (block_iter->Valid()) {
-          delete block_iter;
+
+        delete block_iter;
+        if (found) {
           break;
         }
-        delete block_iter;
       }
     }
   }

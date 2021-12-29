@@ -43,21 +43,12 @@ static double MaxBytesForLevel(const Options* options, int level) {
   // the level-0 compaction threshold based on number of files.
 
   // Result for both level-0 and level-1
-#ifdef MZP
   // 10M 40M 160M 320M
   double result = 10. * 1048576.0;
   while (level > 1) {
     result *= 4;
     level--;
   }
-#else
-  // 10M 100M 1000M 10000M
-  double result = 10. * 1048576.0;
-  while (level > 1) {
-    result *= 10;
-    level--;
-  }
-#endif
   return result;
 }
 
@@ -228,12 +219,29 @@ static Iterator* GetFileIterator(void* arg, const ReadOptions& options,
                               DecodeFixed64(file_value.data() + 8));
   }
 }
+#ifdef MZP
+// 专用于获取串联迭代器的iter_info_
+// 这里对应上面，每个file需要编进去 file_num和file_size
+static void GetIterInfo(std::vector<Slice> &iter_info, std::vector<FileMetaData*>& files) {
+  int i = 0;
+  for (auto &f : files) {
+    char *buf = new char[16];
+    EncodeFixed64(buf, f->number);
+    EncodeFixed64(buf + 8, f->file_size);
+    iter_info[i++] = Slice(buf, 16);
+  }
+}
+#endif
 
 Iterator* Version::NewConcatenatingIterator(const ReadOptions& options,
                                             int level) const {
+#ifdef MZP
+  return nullptr;   // 洒洒水
+#else
   return NewTwoLevelIterator(
       new LevelFileNumIterator(vset_->icmp_, &files_[level]), &GetFileIterator,
       vset_->table_cache_, options);
+#endif
 }
 
 void Version::AddIterators(const ReadOptions& options,
@@ -337,7 +345,6 @@ Status Version::Get(const ReadOptions& options, const LookupKey& k,
   stats->seek_file = nullptr;
   stats->seek_file_level = -1;
 
-  Print();
   struct State {
     Saver saver;
     GetStats* stats;
@@ -559,9 +566,10 @@ void Version::Print() {
   for (int i = 0; i < config::kNumLevels; ++i) {
     if (!files_[i].empty()) {
       for (auto &f : files_[i]) {
-        std::cout << "level:" << i << std::endl;
+        std::cout << "level: " << i << "  sst_count: " << f->sst_count
+                  << "  size: " << f->file_size << "  "; 
         auto k = f->smallest.Encode();
-        std::cout << std::string(k.data(), k.size()-8) << std::endl;
+        std::cout << std::string(k.data(), k.size()-8) << "  ";
         k = f->largest.Encode();
         std::cout << std::string(k.data(), k.size()-8) << std::endl;
       }
@@ -771,6 +779,9 @@ class VersionSet::Builder {
     for (auto &alter : edit->alter_files_) {
       FileMetaData* f = new FileMetaData(alter.second);
       f->refs = 1;
+      // 对于alter的文件，允许不命中次数也应该重置
+      f->allowed_seeks = static_cast<int>((f->file_size / 16384U));
+      if (f->allowed_seeks < 100) f->allowed_seeks = 100;
       levels_[alter.first].altered_files->insert(f);
     }
   #endif
@@ -784,16 +795,16 @@ class VersionSet::Builder {
     auto cmp = &vset_->icmp_;
     int res = -1;
 
-    if (!a && !b) {
+    if (a && b) {
       if (cmp->Compare(a->smallest, b->smallest) < 0) {
         res = 0;
       } else {
         res = 1;
       }
-    } else if (a) {
-      res = 0;
-    } else {
+    } else if (!a) {
       res = 1;
+    } else {
+      res = 0;
     }
 
     if (res == -1) {
@@ -860,7 +871,7 @@ class VersionSet::Builder {
             ++add_iter;
             break;
           case 2:
-            // base的不在new且不在alter 添加
+            // alter的不在delete 添加
             if (delete_files.count(c->number) == 0) {
               c->refs++;
               v->files_[level].emplace_back(c);
@@ -1477,50 +1488,72 @@ Iterator* VersionSet::MakeInputIterator(Compaction* c,
   ReadOptions options;
   options.verify_checksums = options_->paranoid_checks;
   options.fill_cache = false;
+  std::vector<Slice> iter_info;
 
   // 先收集下层的阈值文件
   std::vector<FileMetaData*> tmp_inputs1;
   for (auto &f : c->inputs_[1]) {
     if (f->sst_count == Header::kMaxOldSstableCount 
-        || f->file_size > c->MaxOutputFileSize()) {
+        || f->file_size > c->MaxOutputFileSize() * 4) {
       tmp_inputs1.emplace_back(f);
       inputs1_clean_files.insert(f);
     }
   }
 
-  if (c->level() == 0) {
-    const int space = (tmp_inputs1.empty() ? c->inputs_[0].size() : c->inputs_[0].size() + 1);
-    Iterator** list = new Iterator*[space];
-    int num = 0;
-    for (auto &f : c->inputs_[0]) {  // 上0下无
-      list[num++] = table_cache_->NewIterator(options, f->number, f->file_size);
-    }
-    if (!tmp_inputs1.empty()) {  // 上0下有
-      list[num++] = NewTwoLevelIterator(
-        new Version::LevelFileNumIterator(icmp_, &tmp_inputs1),
-        &GetFileIterator, table_cache_, options);
-    }
-    // 这里不太安全，它的归并的next用到了seek，所以自己实现了一个归并迭代器。
-    Iterator* result = NewMergingIterator(&icmp_, list, num);
-    delete[] list;
-    return result;
-  } else if (!tmp_inputs1.empty()) {  // 上非0下有
-    Iterator** list = new Iterator*[2];
-    list[0] = NewTwoLevelIterator(
-            new Version::LevelFileNumIterator(icmp_, &c->inputs_[0]),
-            &GetFileIterator, table_cache_, options);
-    list[1] = NewTwoLevelIterator(
-            new Version::LevelFileNumIterator(icmp_, &tmp_inputs1),
-            &GetFileIterator, table_cache_, options);
-    Iterator* result = NewMergingIterator(&icmp_, list, 2);
-    delete[] list;
-    return result;
+  // 先暂时用一个大的归并迭代器
+  const int space = c->inputs_[0].size() + tmp_inputs1.size();
+  Iterator** list = new Iterator*[space];
+  int num = 0;
+  for (auto &f : c->inputs_[0]) {  // 上0下无
+    list[num++] = table_cache_->NewIterator(options, f->number, f->file_size);
   }
-  // else 上非0下无
-  return NewTwoLevelIterator(
-    // 看了一下这个TwoLevel, 需要上层是有序的，这个在版本控制里保证了
-    new Version::LevelFileNumIterator(icmp_, &c->inputs_[0]),
-      &GetFileIterator, table_cache_, options);
+  for (auto &f : tmp_inputs1){
+    list[num++] = table_cache_->NewIterator(options, f->number, f->file_size);
+  }
+
+  Iterator* result = NewMergingIterator(&icmp_, list, num);
+  delete[] list;
+  return result;
+
+  // if (c->level() == 0) {
+  //   const int space = (tmp_inputs1.empty() ? c->inputs_[0].size() : c->inputs_[0].size() + 1);
+  //   Iterator** list = new Iterator*[space];
+  //   int num = 0;
+  //   for (auto &f : c->inputs_[0]) {  // 上0下无
+  //     list[num++] = table_cache_->NewIterator(options, f->number, f->file_size);
+  //   }
+  //   if (!tmp_inputs1.empty()) {  // 上0下有
+  //       for (auto &f : tmp_inputs1){
+  //         // 先试试朴素的
+  //         list[num++] = table_cache_->NewIterator(options, f->number, f->file_size);
+  //       }
+  //       // iter_info.resize(tmp_inputs1.size());
+  //       // GetIterInfo(iter_info, tmp_inputs1);
+  //       // list[num++] = NewTwoLevelIterator(iter_info, &GetFileIterator, table_cache_, options);
+  //   }
+  //   // 这里不太安全，它的归并的next用到了seek，所以自己实现了一个归并迭代器。
+  //   Iterator* result = NewMergingIterator(&icmp_, list, num);
+  //   delete[] list;
+  //   return result;
+  // } else if (!tmp_inputs1.empty()) {  // 上非0下有
+  //   Iterator** list = new Iterator*[2];
+  //   iter_info.resize(c->inputs_[0].size());
+  //   GetIterInfo(iter_info, c->inputs_[0]);
+  //   list[0] = NewTwoLevelIterator(iter_info, &GetFileIterator, table_cache_, options);
+
+  //   iter_info.resize(c->inputs_[1].size());
+  //   GetIterInfo(iter_info, c->inputs_[1]);
+  //   list[1] = NewTwoLevelIterator(iter_info, &GetFileIterator, table_cache_, options);
+
+  //   Iterator* result = NewMergingIterator(&icmp_, list, 2);
+  //   delete[] list;
+  //   return result;
+  // }
+  // // else 上非0下无
+  // iter_info.resize(c->inputs_[0].size());
+  // GetIterInfo(iter_info, c->inputs_[0]);
+  // // 看了一下这个TwoLevel, 需要上层是有序的，这个在版本控制里保证了
+  // return NewTwoLevelIterator(iter_info, &GetFileIterator, table_cache_, options);
 }
 
 #else
@@ -1585,6 +1618,7 @@ Compaction* VersionSet::PickCompaction() {
       c->inputs_[0].emplace_back((current_->files_)[level][0]);
     }
   } else if (current_->file_to_compact_ != nullptr) {
+    std::cout << "hehe" << std::endl;
     level = current_->file_to_compact_level_;
     c = new Compaction(options_, level);
     c->inputs_[0].emplace_back(current_->file_to_compact_);

@@ -40,7 +40,7 @@ int main(){
     string value = "test_value";
     string get;
 
-    for (int i = 1 ; i <= 170000; ++i) {
+    for (int i = 1 ; i <= 150000; ++i) {
         key.resize(8);
         value.resize(10);
         key += std::to_string(i);
@@ -52,7 +52,7 @@ int main(){
         }
     }
     
-    // s = db->Write(leveldb::WriteOptions(), nullptr);  // try to force flush
+    s = db->Write(leveldb::WriteOptions(), nullptr);  // try to force flush
     sleep(5);
 
     if(!s.ok()){
@@ -60,15 +60,24 @@ int main(){
         return 0;
     }
     
-    key = "test_key100000";
-    s = db->Get(leveldb::ReadOptions(), key, &get);
-    if(!s.ok()){
-        cout << s.ToString() << endl;
-        return 0;
+    key = "test_key";
+    for (int i = 1 ; i <= 150000; ++i) {
+        key.resize(8);
+        key += std::to_string(i);
+        s = db->Get(leveldb::ReadOptions(), key, &get);
+        if(!s.ok()){
+            cout << s.ToString() << "  " << key << endl;
+            return 0;
+        }
     }
-    cout << "find key:  "<< key << " value is: " << get << endl;
-    s = db->Write(leveldb::WriteOptions(), nullptr);  // try to force flush
-    sleep(3);
+    // s = db->Get(leveldb::ReadOptions(), key, &get);
+    // if(!s.ok()){
+    //     cout << s.ToString() << endl;
+    //     return 0;
+    // }
+    // cout << "find key:  "<< key << " value is: " << get << endl;
+    // s = db->Write(leveldb::WriteOptions(), nullptr);  // try to force flush
+    // sleep(3);
     
     return 0;
 }

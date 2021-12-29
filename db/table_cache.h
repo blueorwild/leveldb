@@ -28,9 +28,10 @@ class TableCache {
   // 根据文件号和文件大小 尝试从缓存中找到该文件并返回缓存节点handle
   // 如果缓存中没有则新建该文件，放入缓存并返回handle。
 #ifdef MZP
-  // force是用于追加文件时强制更新缓存，即默认缓存中没有
+  // force是用于追加文件时强制更新缓存，默认在缓存中去找
+  // 对于compaction 追加的情况，缓存应该更新，这时应该用true
   Status FindTable(uint64_t file_number, uint64_t file_size, Cache::Handle**,
-                   bool force = true);
+                   bool force = false);
 #else
   Status FindTable(uint64_t file_number, uint64_t file_size, Cache::Handle**);
 #endif

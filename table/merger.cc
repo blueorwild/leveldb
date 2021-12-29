@@ -31,7 +31,7 @@ class MergingIterator : public Iterator {
     }
   }
 
-  ~MergingIterator() override {}
+  ~MergingIterator() {}
 
   Slice key() const override {
     assert(Valid());
