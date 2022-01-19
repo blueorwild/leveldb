@@ -1618,7 +1618,7 @@ Compaction* VersionSet::PickCompaction() {
       c->inputs_[0].emplace_back((current_->files_)[level][0]);
     }
   } else if (current_->file_to_compact_ != nullptr) {
-    std::cout << "hehe" << std::endl;
+    // std::cout << "hehe" << std::endl;
     level = current_->file_to_compact_level_;
     c = new Compaction(options_, level);
     c->inputs_[0].emplace_back(current_->file_to_compact_);
@@ -1668,7 +1668,6 @@ Compaction* VersionSet::PickCompaction() {
             level, int(c->inputs_[0].size()), int(c->inputs_[1].size()),
             long(inputs0_size), long(inputs1_size), int(expanded0.size()),
             int(c->inputs_[1].size()), long(expanded0_size), long(inputs1_size));
-        c->inputs_[0] = expanded0;
       }
     }
   }

@@ -1121,6 +1121,23 @@ Status DBImpl::FinishCompactionOutputFile(CompactionState* compact,
   return s;
 }
 
+
+static int compaction_count = 0;
+static int compaction_I = 0;
+static int compaction_O = 0;
+static double compaction_time = 0;
+static double min_time = 100000000.0;
+static double max_time = 0;
+void Print() {
+  std::cout << " ---------------------- " << std::endl;
+  std::cout << "count: " << compaction_count << std::endl;
+  std::cout << "I: " << compaction_I << std::endl;
+  std::cout << "O: " << compaction_O << std::endl;
+  std::cout << "time: " << compaction_time/1000 << " ms" << std::endl;
+  std::cout << "min: " << min_time / 1000 << " ms" << std::endl;
+  std::cout << "max: " << max_time / 1000 << " ms" << std::endl;
+}
+
 #ifdef MZP
 // 原来就是直接一个迭代器，一个大循环，输出到新文件就行了
 // 现在要复杂的多，慢慢来。
@@ -1314,8 +1331,16 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
   input = nullptr;
 
   // 合并的文件写完了，现在来搞版本
+  // ++compaction_count;
   CompactionStats stats;
   stats.micros = env_->NowMicros() - start_micros - imm_micros;
+  // compaction_time += stats.micros;
+  // if(stats.micros < min_time) {
+  //   min_time = stats.micros;
+  // }
+  // if (stats.micros > max_time) {
+  //   max_time = stats.micros;
+  // }
   // 这是统计compaction期间的IO量
   for (int i = 0; i < compact->compaction->num_input_files(0); ++i) {
     stats.bytes_read += compact->compaction->input(0, i)->file_size;
@@ -1326,10 +1351,11 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
   for (auto &f : compact->outputs) {
     stats.bytes_written += f.file_size;
   }
+  // 不准确，应该减去本身已有的。如果不delete的话，这里应该等于I量
   for (auto &f : compact->alters) {
     stats.bytes_written += f->file_size;
   }
-
+  // compaction_I += stats.bytes_read;
   mutex_.Lock();
   stats_[compact->compaction->level() + 1].Add(stats);
 
@@ -1483,7 +1509,15 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
   input = nullptr;
 
   CompactionStats stats;
+  // ++compaction_count;
   stats.micros = env_->NowMicros() - start_micros - imm_micros;
+  // compaction_time += stats.micros;
+  // if(stats.micros < min_time) {
+  //   min_time = stats.micros;
+  // }
+  // if (stats.micros > max_time) {
+  //   max_time = stats.micros;
+  // }
   for (int which = 0; which < 2; which++) {
     for (int i = 0; i < compact->compaction->num_input_files(which); i++) {
       stats.bytes_read += compact->compaction->input(which, i)->file_size;
@@ -1492,7 +1526,8 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
   for (size_t i = 0; i < compact->outputs.size(); i++) {
     stats.bytes_written += compact->outputs[i].file_size;
   }
-
+  // compaction_I += stats.bytes_read;
+  // compaction_O += stats.bytes_written;
   mutex_.Lock();
   stats_[compact->compaction->level() + 1].Add(stats);
 

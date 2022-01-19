@@ -110,12 +110,10 @@ class Test {
 };
 
 int main() {
-  vector<Slice> * ptr = new vector<Slice>(5);
-  Test* t = new Test(ptr);
-  return 0;
 
-  
   fstream file_in("./file.txt",ios::in);
+  
+
   int fd1 = ::open("./file.txt", O_WRONLY | O_CREAT, 0644);
   if (fd1 < 0) {
     cout << "打开文件 写 失败" << endl;
@@ -123,15 +121,18 @@ int main() {
     ::lseek(fd1, 6, SEEK_SET);
     ::write(fd1, "mouzp", 5);
   }
+
   int fd2 = ::open("./file.txt", O_RDONLY);
   char buf[100] = {'\0'};
   if (fd2 < 0) {
     cout << "打开文件 读 失败" << endl;
   } else {
-    ::pread(fd2, buf, 20, 0);
-    cout << buf << endl;
+    ::lseek(fd1, 6, SEEK_SET);
+    int count = ::read(fd2, buf, 100);
+    // ::pread(fd2, buf, 20, 0);
+    cout << buf << " ----" << count << endl;
   }
-
+  
   ::close(fd1);
   ::close(fd2);
   return 0;

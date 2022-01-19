@@ -29,6 +29,7 @@ class VersionSet;
 struct FileMetaData;
 #endif
 
+void Print();
 class DBImpl : public DB {
  public:
   DBImpl(const Options& options, const std::string& dbname);
@@ -37,7 +38,6 @@ class DBImpl : public DB {
   DBImpl& operator=(const DBImpl&) = delete;
 
   ~DBImpl() override;
-
   // Implementations of the DB interface
   Status Put(const WriteOptions&, const Slice& key,
              const Slice& value) override;

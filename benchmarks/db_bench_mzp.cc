@@ -36,20 +36,25 @@
 //      seekrandom    -- N random seeks
 //      seekordered   -- N ordered seeks
 static const char* FLAGS_benchmarks =
-    "fillrandom,"
     "fillseq,"
-    // "wait,"
+    "wait,"
+    "readseq,"
+    "wait,"
+    "readrandom,"
+    "wait,"
+    "readmissing,"
+    "wait,"
+    "readmissing1,"
     // "overwrite,"
     // 这里可能要等下，等compact
     // 前两个读测试涉及全局迭代器，我改的方式不能这么干
-    "wait,"
     // "readseq,"
     // "readreverse,"
-    "readrandom,"
+    // "readrandom,"
     // "readmissing,"
     // "readhot,"
     // "compact,"  待定，后面单独做
-    "wait,"
+    // "wait,"
 ; 
 
 static int FLAGS_num = 2000000;     // 写入多少个kv到数据库
@@ -59,9 +64,9 @@ static int FLAGS_value_size = 100;  // value大小
 static int FLAGS_write_buffer_size = 1 * 1024 * 1024;  // memtable大小
 static int FLAGS_max_file_size = 2 * 1024 * 1024; // db文件大小
 static int FLAGS_block_size = 4 * 1024;    // data_block大小
-static int FLAGS_cache_size = -1;   // cache大小（专用于缓存data, index是肯定缓存的，过滤器若有也缓存）
+static int FLAGS_cache_size = 16 * 1024 * 1024;   // cache大小（专用于缓存data, index是肯定缓存的，过滤器若有也缓存）
 static int FLAGS_open_files = 1000;    // 最大打开文件数
-static int FLAGS_bloom_bits = -1;   // 过滤器每个记录 bit数
+static int FLAGS_bloom_bits = 4;   // 过滤器每个记录 bit数
 static int FLAGS_key_prefix = 0;    // key公共前缀长度
 static const char* FLAGS_db = nullptr;
 
@@ -400,10 +405,10 @@ class Benchmark {
       int num_threads = FLAGS_threads;
 
       if (name == Slice("fillseq")) {
-        fresh_db = false;
+        fresh_db = true;
         method = &Benchmark::WriteSeq;
       } else if (name == Slice("fillrandom")) {
-        fresh_db = false;
+        fresh_db = true;
         method = &Benchmark::WriteRandom;
       } else if (name == Slice("overwrite")) {
         fresh_db = false;
@@ -414,6 +419,8 @@ class Benchmark {
         method = &Benchmark::ReadRandom;
       } else if (name == Slice("readmissing")) {
         method = &Benchmark::ReadMissing;
+      } else if (name == Slice("readmissing1")) {
+        method = &Benchmark::ReadMissing1;
       } else if (name == Slice("readhot")) {
         method = &Benchmark::ReadHot;
       } else if (name == Slice("readwhilewriting")) {
@@ -594,7 +601,7 @@ class Benchmark {
     int found = 0;
     KeyBuffer key;
     for (int i = 0; i < reads_; i++) {
-      const int k = thread->rand.Uniform(FLAGS_num * 1.5);
+      const int k = thread->rand.Uniform(FLAGS_num);
       key.Set(k);
       if (db_->Get(options, key.slice(), &value).ok()) {
         found++;
@@ -609,14 +616,36 @@ class Benchmark {
   void ReadMissing(ThreadState* thread) {
     ReadOptions options;
     std::string value;
+    int found = 0;
     KeyBuffer key;
     for (int i = 0; i < reads_; i++) {
-      const int k = thread->rand.Uniform(FLAGS_num);
+      const int k = thread->rand.Uniform(FLAGS_num * 1.3);
       key.Set(k);
-      Slice s = Slice(key.slice().data(), key.slice().size() - 1);
-      db_->Get(options, s, &value);
+      if (db_->Get(options, key.slice(), &value).ok()) {
+        found++;
+      }
       thread->stats.FinishedSingleOp();
     }
+    char msg[100];
+    std::snprintf(msg, sizeof(msg), "(%d of %d found)", found, num_);
+    thread->stats.AddMessage(msg);
+  }
+  void ReadMissing1(ThreadState* thread) {
+    ReadOptions options;
+    std::string value;
+    int found = 0;
+    KeyBuffer key;
+    for (int i = 0; i < reads_; i++) {
+      const int k = thread->rand.Uniform(FLAGS_num * 2);
+      key.Set(k);
+      if (db_->Get(options, key.slice(), &value).ok()) {
+        found++;
+      }
+      thread->stats.FinishedSingleOp();
+    }
+    char msg[100];
+    std::snprintf(msg, sizeof(msg), "(%d of %d found)", found, num_);
+    thread->stats.AddMessage(msg);
   }
 
   void ReadHot(ThreadState* thread) {

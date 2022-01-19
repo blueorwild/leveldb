@@ -19,6 +19,7 @@
 #include "util/mutexlock.h"
 #include "util/random.h"
 #include "util/testutil.h"
+#include "db/db_impl.h"
 
 using std::string;
 using std::cout;
@@ -27,7 +28,7 @@ using std::endl;
 int main(){
     leveldb::DB* db = nullptr;
     leveldb::Options options;
-    options.filter_policy = leveldb::NewBloomFilterPolicy(4);
+    // options.filter_policy = leveldb::NewBloomFilterPolicy(4);
     options.create_if_missing = true;
     string db_path = "/root/leveldb_m/mzp_test/testdb";
     leveldb::Status s = leveldb::DB::Open(options, db_path, &db);
@@ -35,12 +36,12 @@ int main(){
         cout << s.ToString() << endl;
         return 0;
     }
-
+    // write
+    cout << "start 100000 write" << endl;
     string key = "test_key";
     string value = "test_value";
-    string get;
-
-    for (int i = 1 ; i <= 150000; ++i) {
+    
+    for (int i = 1 ; i <= 100000; ++i) {
         key.resize(8);
         value.resize(10);
         key += std::to_string(i);
@@ -51,33 +52,117 @@ int main(){
             return 0;
         }
     }
-    
     s = db->Write(leveldb::WriteOptions(), nullptr);  // try to force flush
-    sleep(5);
+    sleep(3);
+    leveldb::Print();
 
-    if(!s.ok()){
-        cout << s.ToString() << endl;
-        return 0;
-    }
-    
-    key = "test_key";
-    for (int i = 1 ; i <= 150000; ++i) {
+    for (int i = 1 ; i <= 100000; ++i) {
         key.resize(8);
+        value.resize(10);
         key += std::to_string(i);
-        s = db->Get(leveldb::ReadOptions(), key, &get);
+        value += std::to_string(i);
+        s = db->Put(leveldb::WriteOptions(), key, value);
         if(!s.ok()){
-            cout << s.ToString() << "  " << key << endl;
+            cout << s.ToString() << endl;
             return 0;
         }
     }
-    // s = db->Get(leveldb::ReadOptions(), key, &get);
-    // if(!s.ok()){
-    //     cout << s.ToString() << endl;
-    //     return 0;
-    // }
-    // cout << "find key:  "<< key << " value is: " << get << endl;
+    s = db->Write(leveldb::WriteOptions(), nullptr);  // try to force flush
+    sleep(5);
+    leveldb::Print();
+
+    for (int i = 1 ; i <= 300000; ++i) {
+        key.resize(8);
+        value.resize(10);
+        key += std::to_string(i);
+        value += std::to_string(i);
+        s = db->Put(leveldb::WriteOptions(), key, value);
+        if(!s.ok()){
+            cout << s.ToString() << endl;
+            return 0;
+        }
+    }
+    s = db->Write(leveldb::WriteOptions(), nullptr);  // try to force flush
+    sleep(8);
+    leveldb::Print();
+
+    for (int i = 1 ; i <= 500000; ++i) {
+        key.resize(8);
+        value.resize(10);
+        key += std::to_string(i);
+        value += std::to_string(i);
+        s = db->Put(leveldb::WriteOptions(), key, value);
+        if(!s.ok()){
+            cout << s.ToString() << endl;
+            return 0;
+        }
+    }
+    s = db->Write(leveldb::WriteOptions(), nullptr);  // try to force flush
+    sleep(10);
+    leveldb::Print();
+
+    for (int i = 1 ; i <= 1000000; ++i) {
+        key.resize(8);
+        value.resize(10);
+        key += std::to_string(i);
+        value += std::to_string(i);
+        s = db->Put(leveldb::WriteOptions(), key, value);
+        if(!s.ok()){
+            cout << s.ToString() << endl;
+            return 0;
+        }
+    }
+    s = db->Write(leveldb::WriteOptions(), nullptr);  // try to force flush
+    sleep(15);
+    leveldb::Print();
+    
     // s = db->Write(leveldb::WriteOptions(), nullptr);  // try to force flush
     // sleep(3);
+
+    // read
+    // cout << "start 150000 read" << endl;
+    // string get;
+    // string key = "test_key";
+    // int count1 = 0;
+    // for (int i = 1 ; i <= 150000; ++i) {
+    //     key.resize(8);
+    //     key += std::to_string(i);
+    //     s = db->Get(leveldb::ReadOptions(), key, &get);
+    //     if(s.ok()){
+    //         ++count1;
+    //     }
+    // }
+
+    // delete
+    // cout << "start 50000 delete" << endl;
+    // key = "test_key";
+    // for (int i = 1 ; i <= 50000; ++i) {
+    //     key.resize(8);
+    //     key += std::to_string(i);
+    //     s = db->Delete(leveldb::WriteOptions(), key);
+    //     if(!s.ok()){
+    //         cout << s.ToString() << endl;
+    //         return 0;
+    //     }
+    // }
+    // s = db->Write(leveldb::WriteOptions(), nullptr);  // try to force flush
+    // sleep(3);
+
+    // read
+    // cout << "start 150000 read" << endl;
+    // key = "test_key";
+    // int count2 = 0;
+    // for (int i = 1 ; i <= 150000; ++i) {
+    //     key.resize(8);
+    //     key += std::to_string(i);
+    //     s = db->Get(leveldb::ReadOptions(), key, &get);
+    //     if(s.ok()){
+    //         ++count2;
+    //     }
+    // }
+
+    // cout << "find key count:  "<< count1 << endl;
+    
     
     return 0;
 }

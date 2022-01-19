@@ -412,7 +412,9 @@ Status Table::InternalGet(const ReadOptions& options, const Slice& k, void* arg,
   Cache::Handle* cache_handle = nullptr;
 
   bool found = false;
-  for (int i = 0; i < rep_->index_blocks->size(); ++i) {
+  // 注意，这里因为追加的更加新，所以应该自底向上读
+  for (int i = rep_->index_blocks->size() - 1; i >= 0; --i) {
+  // for (int i = 0; i < rep_->index_blocks->size(); ++i) {
     int j = (*(rep_->index_blocks))[i]->Seek(cmp, k, offset, size);
     if (j >= 0) {
       // 如果某个索引中存在，先读过滤器
@@ -423,7 +425,10 @@ Status Table::InternalGet(const ReadOptions& options, const Slice& k, void* arg,
         block_iter->Seek(k);
         if (block_iter->Valid()) {
           // vaild不代表找到了
-          if (memcmp(k.data(), block_iter->key().data(), k.size() - 8) == 0) {
+          // woc, 这里的memcmp也有bug, -8的初衷是为了去除序列号，然后单纯这样比较还是可能
+          // 出现非理想状态，即k是key的前缀。所以先size比较，还提升性能~
+          if (k.size() == block_iter->key().size() &&
+              memcmp(k.data(), block_iter->key().data(), k.size() - 8) == 0) {
             (*handle_result)(arg, block_iter->key(), block_iter->value());
             found = true;
           }
